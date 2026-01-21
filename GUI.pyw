@@ -270,10 +270,10 @@ class VE3ToolGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("VE3 Tool")
-        self.root.geometry("1000x700")
+        self.root.geometry("1000x850")
         self.root.configure(bg=COLORS["bg_dark"])
         self.root.resizable(True, True)
-        self.root.minsize(800, 600)
+        self.root.minsize(800, 700)
 
         # Process handles
         self.srt_process = None
@@ -320,6 +320,7 @@ class VE3ToolGUI:
         self.create_stats(main)
         self.create_process_cards(main)
         self.create_quick_actions(main)
+        self.create_completed_list(main)
         self.create_log_area(main)
 
     def create_header(self, parent):
@@ -393,12 +394,135 @@ class VE3ToolGUI:
             ("📂 DONE", lambda: os.startfile(DONE_DIR) if DONE_DIR.exists() else None, COLORS["bg_card_hover"]),
             ("📂 VOICE", lambda: os.startfile(VOICE_DIR) if VOICE_DIR.exists() else None, COLORS["bg_card_hover"]),
             ("⬆ Upload", self.upload_github, COLORS["accent_purple"]),
-            ("⬇ Update", self.update_code, COLORS["accent_orange"]),
         ]
 
         for text, cmd, color in buttons:
             btn = ModernButton(btn_row, text, cmd, color, width=95, height=32)
             btn.pack(side=tk.LEFT, padx=(0, 8))
+
+    def create_completed_list(self, parent):
+        """Create list of completed videos."""
+        completed_frame = tk.Frame(parent, bg=COLORS["bg_dark"])
+        completed_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+
+        # Header
+        header = tk.Frame(completed_frame, bg=COLORS["bg_dark"])
+        header.pack(fill=tk.X, pady=(0, 5))
+
+        tk.Label(header, text="🎬 Completed Videos", font=("Segoe UI", 11, "bold"),
+                bg=COLORS["bg_dark"], fg=COLORS["text"]).pack(side=tk.LEFT)
+
+        refresh_btn = tk.Label(header, text="Refresh", font=("Segoe UI", 9),
+                              bg=COLORS["bg_dark"], fg=COLORS["accent_blue"], cursor="hand2")
+        refresh_btn.pack(side=tk.RIGHT)
+        refresh_btn.bind("<Button-1>", lambda e: self.refresh_completed_list())
+
+        # List container
+        list_container = tk.Frame(completed_frame, bg=COLORS["border"])
+        list_container.pack(fill=tk.BOTH, expand=True)
+
+        # Canvas with scrollbar for the list
+        canvas = tk.Canvas(list_container, bg=COLORS["bg_card"], highlightthickness=0, height=150)
+        scrollbar = ttk.Scrollbar(list_container, orient="vertical", command=canvas.yview)
+
+        self.completed_list_frame = tk.Frame(canvas, bg=COLORS["bg_card"])
+
+        self.completed_list_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=self.completed_list_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        # Mouse wheel scrolling
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+
+        canvas.bind_all("<MouseWheel>", on_mousewheel)
+
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1, pady=1)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.completed_canvas = canvas
+        self.refresh_completed_list()
+
+    def refresh_completed_list(self):
+        """Refresh the list of completed videos."""
+        # Clear existing items
+        for widget in self.completed_list_frame.winfo_children():
+            widget.destroy()
+
+        if not DONE_DIR.exists():
+            tk.Label(self.completed_list_frame, text="No completed videos",
+                    bg=COLORS["bg_card"], fg=COLORS["text_dim"],
+                    font=("Segoe UI", 9)).pack(pady=10)
+            return
+
+        # Get all completed videos sorted by modification time (newest first)
+        videos = []
+        for folder in DONE_DIR.iterdir():
+            if folder.is_dir():
+                for mp4 in folder.glob("*.mp4"):
+                    videos.append({
+                        "path": mp4,
+                        "code": folder.name,
+                        "mtime": mp4.stat().st_mtime,
+                        "size": mp4.stat().st_size
+                    })
+
+        videos.sort(key=lambda x: x["mtime"], reverse=True)
+
+        if not videos:
+            tk.Label(self.completed_list_frame, text="No completed videos",
+                    bg=COLORS["bg_card"], fg=COLORS["text_dim"],
+                    font=("Segoe UI", 9)).pack(pady=10)
+            return
+
+        # Show last 20 videos
+        for vid in videos[:20]:
+            self._create_video_item(vid)
+
+    def _create_video_item(self, video_info):
+        """Create a clickable video item."""
+        item_frame = tk.Frame(self.completed_list_frame, bg=COLORS["bg_card"], cursor="hand2")
+        item_frame.pack(fill=tk.X, padx=10, pady=2)
+
+        # Video icon and code
+        code_label = tk.Label(item_frame, text=f"▶ {video_info['code']}",
+                             font=("Segoe UI", 10), bg=COLORS["bg_card"],
+                             fg=COLORS["success"], cursor="hand2")
+        code_label.pack(side=tk.LEFT)
+
+        # Size
+        size_mb = video_info["size"] / (1024 * 1024)
+        size_label = tk.Label(item_frame, text=f"{size_mb:.1f} MB",
+                             font=("Segoe UI", 9), bg=COLORS["bg_card"],
+                             fg=COLORS["text_dim"])
+        size_label.pack(side=tk.RIGHT, padx=(10, 0))
+
+        # Time
+        from datetime import datetime as dt
+        time_str = dt.fromtimestamp(video_info["mtime"]).strftime("%H:%M")
+        time_label = tk.Label(item_frame, text=time_str,
+                             font=("Segoe UI", 9), bg=COLORS["bg_card"],
+                             fg=COLORS["text_dim"])
+        time_label.pack(side=tk.RIGHT)
+
+        # Bind click to play video
+        video_path = video_info["path"]
+        for widget in [item_frame, code_label]:
+            widget.bind("<Button-1>", lambda e, p=video_path: self.play_video(p))
+            widget.bind("<Enter>", lambda e, f=item_frame: f.configure(bg=COLORS["bg_card_hover"]))
+            widget.bind("<Leave>", lambda e, f=item_frame: f.configure(bg=COLORS["bg_card"]))
+
+    def play_video(self, video_path):
+        """Play video file."""
+        try:
+            os.startfile(str(video_path))
+            self.log(f"Playing: {video_path.name}", "info")
+        except Exception as e:
+            self.log(f"Cannot play video: {e}", "error")
 
     def create_log_area(self, parent):
         log_frame = tk.Frame(parent, bg=COLORS["bg_dark"])
@@ -467,6 +591,10 @@ class VE3ToolGUI:
                     step = f"{step} ({clip_current}/{clip_total})"
 
                 self.edit_card.set_progress(percent, code, step)
+
+                # Refresh completed list when a video is done
+                if step == "Done" and percent == 100:
+                    self.root.after(1000, self.refresh_completed_list)
         except:
             pass
 
@@ -625,17 +753,6 @@ class VE3ToolGUI:
                 self.root.after(0, lambda: self.log(f"Upload error: {e}", "error"))
 
         threading.Thread(target=do_upload, daemon=True).start()
-
-    def update_code(self):
-        if messagebox.askyesno("Update", "Download latest code from GitHub?\n\nYour config files will be kept."):
-            self.log("Updating from GitHub...", "info")
-
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-            subprocess.Popen([sys.executable, str(TOOL_DIR / "UPDATE.py")],
-                           cwd=str(TOOL_DIR), startupinfo=startupinfo)
-
 
 # ============================================================================
 # MAIN
