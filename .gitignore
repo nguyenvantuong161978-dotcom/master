@@ -25,3 +25,6 @@ logs/
 # Temp
 *.tmp
 temp/
+
+# Claude
+.claude/

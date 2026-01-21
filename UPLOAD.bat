@@ -11,12 +11,8 @@ echo [1] Adding all files...
 git add -A
 
 echo.
-set /p msg="Commit message (Enter = auto): "
-if "%msg%"=="" set msg=Update %date% %time%
-
-echo.
-echo [2] Committing: %msg%
-git commit -m "%msg%"
+echo [2] Committing...
+git commit -m "Update %date% %time%"
 
 echo.
 echo [3] Pushing to GitHub (main)...
@@ -24,6 +20,7 @@ git push -u origin main
 
 echo.
 echo ============================================
-echo   DONE! Check: https://github.com/nguyenvantuong161978-dotcom/master
+echo   DONE!
+echo   URL: https://github.com/nguyenvantuong161978-dotcom/master
 echo ============================================
 pause
