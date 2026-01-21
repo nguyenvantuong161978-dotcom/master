@@ -804,21 +804,13 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                 abs_path = str(Path(item['path']).resolve()).replace('\\', '/')
                 target_duration = item['duration']
 
-                rand_val = random.random()
-                if rand_val < 0.2:
-                    transition_type = 'none'
-                elif rand_val < 0.6:
-                    transition_type = 'fade_black'
-                else:
-                    transition_type = 'mix'
-
+                # Random transition: fade_black (50%) or mix (50%)
                 fade_out_start = max(0, target_duration - FADE_DURATION)
-
-                if transition_type == 'none':
-                    fade_filter = ""
-                elif transition_type == 'fade_black':
+                if random.random() < 0.5:
+                    # Fade to black
                     fade_filter = f"fade=t=in:st=0:d={FADE_DURATION},fade=t=out:st={fade_out_start}:d={FADE_DURATION}"
                 else:
+                    # Crossfade/mix
                     fade_filter = f"fade=t=in:st=0:d={FADE_DURATION}:alpha=1,fade=t=out:st={fade_out_start}:d={FADE_DURATION}:alpha=1"
 
                 if item['is_video']:
