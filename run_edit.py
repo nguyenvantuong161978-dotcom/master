@@ -388,7 +388,8 @@ def get_project_info(project_dir: Path) -> Dict:
         if info["total_scenes"] > 0:
             coverage = info["media_count"] / info["total_scenes"]
 
-            if 0.5 <= coverage < 1.0:
+            # Fill missing media if coverage >= 10% and < 100%
+            if 0.1 <= coverage < 1.0:
                 log(f"    - {code}: Coverage {coverage:.0%} < 100%, filling missing...")
                 filled, still_missing = fill_missing_media(project_dir, excel_path)
 
