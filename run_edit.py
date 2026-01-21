@@ -870,23 +870,20 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             if srt_path and srt_path.exists():
                 plog("  Burning subtitles...")
                 srt_escaped = str(srt_path).replace('\\', '/').replace(':', '\\:')
-                font_dir = "C\\:/Users/admin/AppData/Local/Microsoft/Windows/Fonts"
 
+                # Use default font (no custom font path - works on all machines)
                 subtitle_style = (
-                    "FontName=Anton,FontSize=32,PrimaryColour=&H00FFFFFF,"
-                    "OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=30,Alignment=2"
+                    "FontSize=28,PrimaryColour=&H00FFFFFF,"
+                    "OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,MarginV=25,Alignment=2"
                 )
-                vf_filter = f"subtitles='{srt_escaped}':fontsdir='{font_dir}':force_style='{subtitle_style}'"
+                vf_filter = f"subtitles='{srt_escaped}':force_style='{subtitle_style}'"
 
                 cmd3 = ["ffmpeg", "-y", "-i", str(temp_with_audio), "-vf", vf_filter, "-c:a", "copy", str(output_path)]
                 result = subprocess.run(cmd3, capture_output=True, text=True)
                 if result.returncode != 0:
-                    plog("  Subtitle burn failed, trying default font...", "WARN")
-                    vf_simple = f"subtitles='{srt_escaped}':force_style='FontSize=32,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2'"
-                    cmd3_simple = ["ffmpeg", "-y", "-i", str(temp_with_audio), "-vf", vf_simple, "-c:a", "copy", str(output_path)]
-                    result = subprocess.run(cmd3_simple, capture_output=True, text=True)
-                    if result.returncode != 0:
-                        shutil.copy(temp_with_audio, output_path)
+                    plog(f"  Subtitle burn failed: {result.stderr[-100:]}", "WARN")
+                    # Fallback: copy without subtitles
+                    shutil.copy(temp_with_audio, output_path)
             else:
                 shutil.copy(temp_with_audio, output_path)
 

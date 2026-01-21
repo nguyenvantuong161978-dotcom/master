@@ -28,9 +28,13 @@ TOKEN_FILE = Path(__file__).parent / "config" / "github_token.txt"
 FILES_TO_UPLOAD = [
     "run_srt.py",
     "run_edit.py",
+    "GUI.pyw",
     "RUN_MASTER.bat",
+    "RUN_GUI.bat",
     "UPLOAD.bat",
     "UPLOAD.py",
+    "UPDATE.py",
+    "UPDATE.bat",
     ".gitignore",
     "config/settings.yaml",
 ]
