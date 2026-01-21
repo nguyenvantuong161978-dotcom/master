@@ -39,7 +39,7 @@ CONFIG_FILE = TOOL_DIR / "config" / "config.json"
 PROGRESS_FILE = TOOL_DIR / "progress.json"
 
 SCAN_INTERVAL = 60
-DEFAULT_PARALLEL = 2
+DEFAULT_PARALLEL = 4
 
 # Google Sheet config
 SOURCE_SHEET_NAME = "NGUON"
