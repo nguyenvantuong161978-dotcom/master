@@ -1,0 +1,274 @@
+# VE3 Tool Configuration
+# ========================
+
+project_root: "./VE3_TOOL"
+
+# ============================================================================
+# CHROME SETTINGS - Dùng Chrome portable đã đăng nhập sẵn
+# ============================================================================
+# Chỉ cần chỉ đường dẫn đến Chrome portable của bạn
+# Chrome này đã đăng nhập Google sẵn, không cần tạo profile mới
+
+# Đường dẫn đến Chrome portable (đã đăng nhập Google)
+# Để trống = tự động detect theo thứ tự:
+#   1. GoogleChromePortable/GoogleChromePortable.exe (trong thư mục tool)
+#   2. Documents/GoogleChromePortable/GoogleChromePortable.exe
+#   3. Documents/ve3/ve3.exe (legacy)
+chrome_portable: ""
+
+# Parallel Chrome - Chạy nhiều Chrome song song
+# Format: "worker/total" - VD: "1/2", "2/4"
+# Ví dụ 2 Chrome: Terminal 1 = "1/2", Terminal 2 = "2/2"
+# Ví dụ 4 Chrome: "1/4", "2/4", "3/4", "4/4"
+# Để trống = xử lý tất cả (mặc định)
+parallel_chrome: ""
+
+# [KHÔNG CẦN SỬA] - Chỉ dùng khi chrome_portable trống
+chrome_path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+chrome_profile: ""
+
+# ============================================================================
+# GOOGLE FLOW API Configuration
+# ============================================================================
+# Token sẽ được tự động lấy khi chạy GUI
+# Hoặc paste thủ công vào đây
+
+flow_bearer_token: ""
+flow_project_id: ""
+flow_aspect_ratio: "landscape"
+flow_image_count: 1
+flow_timeout: 120
+flow_delay: 3.0
+
+# DrissionPage Settings (Image Generation)
+# Sử dụng DrissionPage + Interceptor để tạo ảnh
+# IPv6 proxy đã bị bỏ - chỉ dùng Webshare
+
+# Webshare Proxy Pool
+# Có 2 chế độ:
+#   1. Direct Proxy List: 100 IP datacenter cố định, tự xoay khi block
+#   2. Rotating Residential: IP tự động đổi mỗi session
+#
+# Lấy API key: https://proxy.webshare.io/dashboard → API Keys
+webshare_proxy:
+  enabled: false              # TẮT proxy - dùng mạng máy trực tiếp
+
+  # === PROXY MODE ===
+  # "direct" = Sử dụng Direct Proxy List (100 IP cố định)
+  # "rotating" = Sử dụng Rotating Residential (IP tự động đổi)
+  proxy_mode: "direct"  # Mặc định: Direct Proxy List (100 IP cố định, ổn định hơn)
+
+  # === ROTATING RESIDENTIAL ===
+  # Có 2 mode:
+  #   1. Random IP: username kết thúc bằng '-rotate' → mỗi request = IP ngẫu nhiên
+  #   2. Sticky Session: username không có '-rotate' → session ID tự động thêm
+  #
+  # VD Random: jhvbehdf-residential-rotate:password@p.webshare.io:80
+  # VD Sticky: jhvbehdf-residential-1:password@p.webshare.io:80
+  rotating_host: "p.webshare.io"
+  rotating_port: 80
+  rotating_password: "cf1bi3yvq0t1"
+  rotating_base_username: "jhvbehdf-residential-rotate"  # -rotate = Random IP mỗi request
+  machine_id: 1  # Chỉ dùng khi Sticky Session (Máy 1→ 1... Máy 2→ 30001...)
+
+  # === DIRECT PROXY LIST (100 IPs) ===
+  proxy_file: "config/proxies.txt"  # File chứa danh sách proxy
+  api_key: "pfi2ljk73uysoze9ozg58nsp4af7au0vchs0b027"  # Webshare API key
+
+# ============================================================================
+# VIDEO GENERATION (VEO 3) Settings
+# ============================================================================
+# Tạo video bằng Veo 3 qua Google Flow API
+# Sau khi tạo ảnh xong, tự động tạo video từ ảnh đó
+
+# Số ảnh chuyển thành video (0 = tắt, "full" = tất cả)
+# VD: 10 = chỉ 10 ảnh đầu tiên sẽ được chuyển thành video
+# Nếu đã có đủ số video trong img/, sẽ tự động skip
+video_count: "full"
+
+# Video aspect ratio: "landscape" (16:9), "portrait" (9:16), "square" (1:1)
+video_aspect_ratio: "landscape"
+
+# Video model: "fast" (veo_3_1_t2v_fast_ultra) hoặc "quality" (veo_3_1_t2v)
+video_model: "fast"
+
+# User paygate tier: "TIER_ONE" hoặc "TIER_TWO"
+video_paygate_tier: "PAYGATE_TIER_TWO"
+
+# Video generation mode: "t2v" hoặc "i2v"
+# - t2v: Pure Text-to-Video - Gửi prompt trực tiếp, Chrome tạo video từ text
+#        Sử dụng mode "Từ văn bản sang video" trên Flow
+# - i2v: Image-to-Video - Tạo video từ ảnh đã gen (cần media_id)
+#        Sử dụng mode "Tạo video từ các thành phần" trên Flow
+# Mặc định: t2v (Text-to-Video vì đơn giản hơn, không cần ảnh)
+video_generation_mode: "t2v"
+
+# ============================================================================
+# PROXY API Configuration (Bypass Captcha qua nanoai.pics)
+# ============================================================================
+# Sử dụng proxy API để bypass reCAPTCHA khi gọi trực tiếp Google API
+
+# Bật/tắt proxy mode
+use_proxy: true
+
+# Token cho proxy API (lấy từ nanoai.pics)
+proxy_api_token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ODMsInJvbGUiOjMsImlhdCI6MTc2NjQxOTE4OX0.D8tvSOeFpXCEgRL_ovWcp_A7pDZvGoOL5kVQRsuuUmc"
+
+# Proxy API endpoint
+proxy_api_url: "https://flow-api.nanoai.pics/api/fix/create-video-veo3"
+
+# ============================================================================
+# AI API Configuration (Cho tạo prompts từ SRT)
+# ============================================================================
+# Sử dụng DeepSeek API
+
+# DeepSeek API (ưu tiên - rẻ và ổn định)
+# Lấy key tại: https://platform.deepseek.com/
+deepseek_api_key: "sk-9e957b1193f54ac3870fe05a95139633"
+
+# Gemini API (optional - dự phòng)
+# Lấy key tại: https://makersuite.google.com/app/apikey
+gemini_api_keys:
+  - ""  # Thêm API key của bạn vào đây
+
+gemini_models:
+  - "gemini-2.0-flash"
+  - "gemini-2.5-flash"
+
+# Groq API (optional - miễn phí)
+# Lấy key tại: https://console.groq.com/keys
+groq_api_keys:
+  - ""  # Thêm API key của bạn vào đây
+
+# ============================================================================
+# Automation Settings (Optional)
+# ============================================================================
+max_scenes_per_account: 50
+retry_count: 3
+wait_timeout: 30
+
+# Scene duration (giây) - thời lượng mỗi ảnh trong video
+# 5-8s: Phù hợp với video (đủ thời gian để người xem nhìn rõ)
+# Video chuyên nghiệp thường dùng 5-8s mỗi scene
+min_scene_duration: 5
+max_scene_duration: 8
+
+# ============================================================================
+# VIDEO COMPOSITION - Chế độ ghép video
+# ============================================================================
+
+# Chế độ edit: "quality", "balanced", "fast"
+# - quality: Ken Burns đầy đủ + easing mượt (chậm nhất, đẹp nhất)
+# - balanced: Ken Burns đơn giản hóa (cân bằng tốc độ/chất lượng) [KHUYÊN DÙNG]
+# - fast: Chỉ fade in/out, không zoom/pan (nhanh nhất)
+#
+# Thời gian ước tính cho 100 clips:
+#   RTX 4070/3060: quality ~8 phút, balanced ~3 phút, fast ~1 phút
+#   CPU only:      quality ~30 phút, balanced ~15 phút, fast ~5 phút
+video_compose_mode: "fast"
+
+# ============================================================================
+# KEN BURNS EFFECTS - Hiệu ứng zoom/pan cho ảnh tĩnh
+# ============================================================================
+# Chỉ áp dụng khi video_compose_mode = "quality" hoặc "balanced"
+
+# Cường độ hiệu ứng: "subtle", "normal", "strong"
+# - subtle: Zoom 6%, pan 4% - rất nhẹ, gần như tĩnh
+# - normal: Zoom 12%, pan 8% - cân bằng (mặc định)
+# - strong: Zoom 18%, pan 12% - mạnh hơn, chuyển động rõ ràng
+ken_burns_intensity: "normal"
+
+# Whisper Settings (Voice to SRT)
+# Models: tiny, base, small, medium, large, large-v2, large-v3
+# Lớn hơn = chính xác hơn nhưng chậm hơn và cần nhiều RAM/VRAM
+# Tiếng Anh: "small" hoặc "medium" là đủ tốt
+# Tiếng Việt: "medium" hoặc "large-v3" (khó hơn)
+whisper_model: "base"
+whisper_language: "en"
+
+# Logging
+log_level: "INFO"
+
+# ============================================================================
+# PARALLEL PROCESSING Settings - Tối ưu tốc độ xử lý
+# ============================================================================
+
+# Số lượng voice xử lý song song (1-5)
+# Ví dụ: 3 voices x 90 phút = 270 phút (tuần tự) -> ~100 phút (song song)
+# Cần nhiều RAM và CPU khi tăng số này
+parallel_voices: 1
+
+# Số lượng ảnh bắt đầu tạo video ngay (không chờ hết ảnh)
+# VD: 10 = khi có 10 ảnh đầu tiên sẽ bắt đầu tạo video song song với tạo ảnh
+early_video_start: 10
+
+# ============================================================================
+# BROWSER AUTOMATION Settings
+# ============================================================================
+# Su dung browser automation thay cho API (khong can bearer token)
+
+# Generation mode: "api" hoặc "chrome"
+# api: DrissionPage + Interceptor (Chrome API) - cần proxy_api_token
+# chrome: Selenium WebDriver (fallback)
+generation_mode: "api"
+
+# Force model: Đảm bảo sử dụng model chất lượng cao (Nano Banana Pro)
+# Các giá trị:
+# - "": Không force, dùng model Chrome chọn
+# - "auto": Tự động force GEM_PIX_2 nếu Chrome dùng model kém
+# - "always": Luôn force GEM_PIX_2 (khuyên dùng)
+# - "GEM_PIX_2": Force model cụ thể (Nano Banana Pro - chất lượng cao nhất)
+# - "IMAGEN_4": Force Imagen 4
+force_model: "always"
+
+# Parallel mode: So luong browser chay song song (1-5)
+# Nhieu browser = nhanh hon, nhung can nhieu RAM va profile
+# Workflow: Tao anh tham chieu truoc, roi tao phan canh song song
+parallel_browsers: 1
+
+# Thu muc chua Chrome profiles (luu session login)
+browser_profiles_dir: "./chrome_profiles"
+
+# Chay headless (an trinh duyet) - Mac dinh True khi da dang nhap
+browser_headless: false
+
+# Timeout cho dang nhap (giay)
+browser_login_timeout: 120
+
+# Delay giua cac prompt (ms)
+browser_delay_between_prompts: 2000
+
+# Timeout cho moi anh (giay)
+browser_generate_timeout: 120
+
+# ============================================================================
+# IPv6 ROTATION Settings (Đổi IPv6 khi bị 403)
+# ============================================================================
+# Khi Chrome bị 403 liên tục, tự động đổi IPv6 để bypass
+
+ipv6_rotation:
+  enabled: false              # Bật/tắt tính năng đổi IPv6
+
+  # Interface name (tên adapter mạng)
+  # Chạy "netsh interface ipv6 show addresses" để xem tên
+  interface_name: "Ethernet"  # Hoặc "Wi-Fi", "vEthernet (WSL)"...
+
+  # IPv6 Subnet prefix (VD: 2001:db8::/56)
+  # Chỉ cần prefix, tool sẽ tự random phần còn lại
+  subnet_prefix: ""           # VD: "2001:db8:1234:5600"
+  prefix_length: 56           # /56 = 256 subnets
+
+  # Số lần 403 liên tiếp trước khi đổi IPv6
+  max_403_before_rotate: 3
+
+  # Tắt IPv4 để ép Chrome dùng IPv6
+  # CẢNH BÁO: Nếu dùng Remote Desktop qua IPv4, để FALSE!
+  disable_ipv4: false         # false = giữ IPv4 cho RDP
+
+  # KHÔNG CẦN proxy nữa - Tool set Windows prefix policy để ưu tiên IPv6
+  # Chrome sẽ tự động dùng IPv6 cho outgoing connections
+  use_local_proxy: false      # false = Chrome chạy trực tiếp, không qua proxy
+  local_proxy_port: 1088      # (không dùng nếu use_local_proxy=false)
+
+  # Gateway IPv6 (nếu cần)
+  gateway: ""                 # Để trống nếu không cần
