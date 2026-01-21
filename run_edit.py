@@ -38,7 +38,7 @@ THUMB_DIR = Path(r"D:\AUTO\thumbnails")
 CONFIG_FILE = TOOL_DIR / "config" / "config.json"
 PROGRESS_FILE = TOOL_DIR / "progress.json"
 
-SCAN_INTERVAL = 60
+SCAN_INTERVAL = 30  # Scan every 30 seconds for new projects
 DEFAULT_PARALLEL = 4
 
 # Google Sheet config
@@ -1257,6 +1257,10 @@ def run_scan_loop(parallel: int = DEFAULT_PARALLEL):
 
             # Reset progress after batch
             update_progress(code="", step="Waiting", percent=0, clip_current=0, clip_total=0, status="idle")
+
+            # Immediately scan again if there were projects (continuous processing)
+            log("  Batch done, scanning for more...")
+            continue
 
         log(f"\n  Waiting {SCAN_INTERVAL}s... (Ctrl+C to stop)")
         try:
