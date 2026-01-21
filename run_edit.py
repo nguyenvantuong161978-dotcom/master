@@ -36,6 +36,7 @@ VISUAL_DIR = Path(r"D:\AUTO\VISUAL")
 DONE_DIR = Path(r"D:\AUTO\done")
 THUMB_DIR = Path(r"D:\AUTO\thumbnails")
 CONFIG_FILE = TOOL_DIR / "config" / "config.json"
+PROGRESS_FILE = TOOL_DIR / "progress.json"
 
 SCAN_INTERVAL = 60
 DEFAULT_PARALLEL = 2
@@ -48,6 +49,48 @@ STATUS_VALUE = "EDIT XONG"
 
 MAX_RETRIES = 5
 RETRY_BASE_DELAY = 2
+
+# Hide console window for subprocess on Windows
+if sys.platform == "win32":
+    SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW
+else:
+    SUBPROCESS_FLAGS = 0
+
+
+# Progress tracking for GUI
+_current_progress = {
+    "code": "",
+    "step": "",
+    "percent": 0,
+    "clip_current": 0,
+    "clip_total": 0,
+    "status": "idle"
+}
+
+
+def update_progress(code: str = None, step: str = None, percent: int = None,
+                   clip_current: int = None, clip_total: int = None, status: str = None):
+    """Update progress and write to file for GUI to read."""
+    if code is not None:
+        _current_progress["code"] = code
+    if step is not None:
+        _current_progress["step"] = step
+    if percent is not None:
+        _current_progress["percent"] = percent
+    if clip_current is not None:
+        _current_progress["clip_current"] = clip_current
+    if clip_total is not None:
+        _current_progress["clip_total"] = clip_total
+    if status is not None:
+        _current_progress["status"] = status
+
+    _current_progress["updated"] = time.strftime("%H:%M:%S")
+
+    try:
+        with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
+            json.dump(_current_progress, f)
+    except:
+        pass
 
 
 def log(msg: str, level: str = "INFO"):
@@ -552,6 +595,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
         else:
             log(f"[{code}] {msg}", level)
 
+    update_progress(code=code, step="Starting", percent=0, status="composing")
     plog("Starting video composition...")
 
     if not excel_path or not excel_path.exists():
@@ -559,7 +603,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
 
     # Check FFmpeg
     try:
-        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True)
+        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
         if result.returncode != 0:
             return False, None, "FFmpeg not working"
     except FileNotFoundError:
@@ -692,7 +736,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
         # Get voice duration
         probe_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
                     "-of", "default=noprint_wrappers=1:nokey=1", str(voice_path)]
-        result = subprocess.run(probe_cmd, capture_output=True, text=True)
+        result = subprocess.run(probe_cmd, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
         total_duration = float(result.stdout.strip()) if result.stdout.strip() else 60.0
         plog(f"  Voice duration: {total_duration:.1f}s")
 
@@ -738,7 +782,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             use_gpu = False
             gpu_encoder = "libx264"
             try:
-                gpu_check = subprocess.run(["ffmpeg", "-encoders"], capture_output=True, text=True, timeout=5)
+                gpu_check = subprocess.run(["ffmpeg", "-encoders"], capture_output=True, text=True, timeout=5, creationflags=SUBPROCESS_FLAGS)
                 if "h264_nvenc" in gpu_check.stdout:
                     use_gpu = True
                     gpu_encoder = "h264_nvenc"
@@ -751,6 +795,8 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
 
             plog(f"  Compose mode: {compose_mode.upper()}")
             plog(f"  Creating {len(media_items)} clips...")
+            total_clips = len(media_items)
+            update_progress(step="Creating clips", percent=5, clip_total=total_clips)
 
             clip_paths = []
             for i, item in enumerate(media_items):
@@ -778,7 +824,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                 if item['is_video']:
                     probe_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
                                 "-of", "default=noprint_wrappers=1:nokey=1", abs_path]
-                    probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
+                    probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
                     video_duration = float(probe_result.stdout.strip()) if probe_result.stdout.strip() else 8.0
 
                     if fade_filter:
@@ -831,20 +877,25 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                             "-preset", cpu_preset, "-pix_fmt", "yuv420p", "-r", "25", str(clip_path)
                         ]
 
-                result = subprocess.run(cmd_clip, capture_output=True, text=True, timeout=300)
+                result = subprocess.run(cmd_clip, capture_output=True, text=True, timeout=300, creationflags=SUBPROCESS_FLAGS)
                 if result.returncode != 0:
                     plog(f"  Clip {i} failed: {result.stderr[-200:]}", "ERROR")
                     continue
 
                 clip_paths.append(clip_path)
 
+                # Update progress (clips = 5-70% of total)
+                clip_percent = 5 + int((i + 1) / total_clips * 65)
+                update_progress(clip_current=i+1, percent=clip_percent)
+
                 if (i + 1) % 10 == 0:
-                    plog(f"  ... {i + 1}/{len(media_items)} clips")
+                    plog(f"  ... {i + 1}/{total_clips} clips")
 
             if not clip_paths:
                 return False, None, "No clips created"
 
             plog(f"  Created {len(clip_paths)} clips, concatenating...")
+            update_progress(step="Concatenating", percent=75)
 
             # Concat
             list_file = Path(temp_dir) / "clips.txt"
@@ -853,21 +904,23 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                     f.write(f"file '{str(cp).replace(chr(92), '/')}'\n")
 
             cmd_concat = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(temp_video)]
-            result = subprocess.run(cmd_concat, capture_output=True, text=True)
+            result = subprocess.run(cmd_concat, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
             if result.returncode != 0:
                 return False, None, f"Concat error: {result.stderr[-200:]}"
 
             # Add audio
             temp_with_audio = Path(temp_dir) / "with_audio.mp4"
+            update_progress(step="Adding audio", percent=85)
             plog("  Adding voice...")
             cmd2 = ["ffmpeg", "-y", "-i", str(temp_video), "-i", str(voice_path),
                    "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(temp_with_audio)]
-            result = subprocess.run(cmd2, capture_output=True, text=True)
+            result = subprocess.run(cmd2, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
             if result.returncode != 0:
                 return False, None, f"Audio merge error: {result.stderr[-200:]}"
 
             # Burn subtitles
             if srt_path and srt_path.exists():
+                update_progress(step="Burning subtitles", percent=92)
                 plog("  Burning subtitles...")
                 srt_escaped = str(srt_path).replace('\\', '/').replace(':', '\\:')
 
@@ -879,7 +932,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                 vf_filter = f"subtitles='{srt_escaped}':force_style='{subtitle_style}'"
 
                 cmd3 = ["ffmpeg", "-y", "-i", str(temp_with_audio), "-vf", vf_filter, "-c:a", "copy", str(output_path)]
-                result = subprocess.run(cmd3, capture_output=True, text=True)
+                result = subprocess.run(cmd3, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
                 if result.returncode != 0:
                     plog(f"  Subtitle burn failed: {result.stderr[-100:]}", "WARN")
                     # Fallback: copy without subtitles
@@ -887,6 +940,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             else:
                 shutil.copy(temp_with_audio, output_path)
 
+            update_progress(step="Done", percent=100, status="completed")
             plog(f"  Video done: {output_path.name}", "OK")
             return True, output_path, None
 

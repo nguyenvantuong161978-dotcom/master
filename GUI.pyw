@@ -11,6 +11,7 @@ import threading
 import subprocess
 import time
 import signal
+import json
 from pathlib import Path
 from datetime import datetime
 
@@ -30,6 +31,7 @@ VISUAL_DIR = Path(r"D:\AUTO\VISUAL")
 DONE_DIR = Path(r"D:\AUTO\done")
 VOICE_DIR = Path(r"D:\AUTO\voice")
 PROJECTS_DIR = TOOL_DIR / "PROJECTS"
+PROGRESS_FILE = TOOL_DIR / "progress.json"
 
 # Colors - GitHub Dark Theme
 COLORS = {
@@ -148,7 +150,7 @@ class StatCard(tk.Frame):
 
 
 class ProcessCard(tk.Frame):
-    """Card for process control."""
+    """Card for process control with progress bar."""
 
     def __init__(self, parent, title, subtitle, icon, color, on_start, on_stop, **kwargs):
         super().__init__(parent, bg=COLORS["bg_card"], **kwargs)
@@ -185,6 +187,23 @@ class ProcessCard(tk.Frame):
                                     bg=COLORS["bg_card"], fg=COLORS["text_dim"])
         self.status_text.pack(side=tk.LEFT, padx=(5, 0))
 
+        # Progress section
+        progress_frame = tk.Frame(inner, bg=COLORS["bg_card"])
+        progress_frame.pack(fill=tk.X, pady=(10, 0))
+
+        self.progress_label = tk.Label(progress_frame, text="", font=("Segoe UI", 9),
+                                       bg=COLORS["bg_card"], fg=COLORS["text_dim"])
+        self.progress_label.pack(anchor=tk.W)
+
+        # Progress bar
+        self.progress_canvas = tk.Canvas(progress_frame, height=8, bg=COLORS["bg_dark"],
+                                        highlightthickness=0)
+        self.progress_canvas.pack(fill=tk.X, pady=(5, 0))
+
+        self.percent_label = tk.Label(progress_frame, text="", font=("Segoe UI", 9, "bold"),
+                                      bg=COLORS["bg_card"], fg=color)
+        self.percent_label.pack(anchor=tk.E)
+
         btn_frame = tk.Frame(inner, bg=COLORS["bg_card"])
         btn_frame.pack(fill=tk.X, pady=(15, 0))
 
@@ -216,6 +235,31 @@ class ProcessCard(tk.Frame):
             self.status_text.config(text="Stopped", fg=COLORS["text_dim"])
             self.start_btn.set_disabled(False)
             self.stop_btn.set_disabled(True)
+            # Clear progress
+            self.set_progress(0, "", "")
+
+    def set_progress(self, percent, code, step):
+        """Update progress bar and labels."""
+        # Update progress bar
+        self.progress_canvas.delete("all")
+        width = self.progress_canvas.winfo_width()
+        if width > 1:
+            # Background
+            self.progress_canvas.create_rectangle(0, 0, width, 8,
+                                                  fill=COLORS["bg_dark"], outline="")
+            # Fill
+            fill_width = int(width * percent / 100)
+            if fill_width > 0:
+                self.progress_canvas.create_rectangle(0, 0, fill_width, 8,
+                                                      fill=self.color, outline="")
+
+        # Update labels
+        if code and step:
+            self.progress_label.config(text=f"{code}: {step}")
+            self.percent_label.config(text=f"{percent}%")
+        else:
+            self.progress_label.config(text="")
+            self.percent_label.config(text="")
 
 
 # ============================================================================
@@ -242,6 +286,7 @@ class VE3ToolGUI:
 
         self.create_ui()
         self.refresh_stats()
+        self.update_progress()
 
     def on_closing(self):
         """Handle window close - kill all processes."""
@@ -403,6 +448,30 @@ class VE3ToolGUI:
     def clear_log(self):
         self.log_text.delete(1.0, tk.END)
         self.log("Log cleared", "info")
+
+    def update_progress(self):
+        """Read progress file and update Edit card progress bar."""
+        try:
+            if PROGRESS_FILE.exists() and self.edit_running:
+                with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
+                    progress = json.load(f)
+
+                code = progress.get("code", "")
+                step = progress.get("step", "")
+                percent = progress.get("percent", 0)
+                clip_current = progress.get("clip_current", 0)
+                clip_total = progress.get("clip_total", 0)
+
+                # Add clip info to step if creating clips
+                if clip_total > 0 and "clip" in step.lower():
+                    step = f"{step} ({clip_current}/{clip_total})"
+
+                self.edit_card.set_progress(percent, code, step)
+        except:
+            pass
+
+        # Refresh every 500ms for smooth updates
+        self.root.after(500, self.update_progress)
 
     def refresh_stats(self):
         voice_count = 0
