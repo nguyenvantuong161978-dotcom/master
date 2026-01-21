@@ -1215,6 +1215,9 @@ def run_scan_loop(parallel: int = DEFAULT_PARALLEL):
     log(f"  Scan interval: {SCAN_INTERVAL}s")
     log("="*60)
 
+    # Reset progress on start
+    update_progress(code="", step="Waiting", percent=0, clip_current=0, clip_total=0, status="idle")
+
     DONE_DIR.mkdir(parents=True, exist_ok=True)
 
     cycle = 0
@@ -1227,6 +1230,7 @@ def run_scan_loop(parallel: int = DEFAULT_PARALLEL):
 
         if not pending:
             log("  No pending projects")
+            update_progress(code="", step="Waiting", percent=0, clip_current=0, clip_total=0, status="idle")
         else:
             log(f"  Found {len(pending)} projects ready to edit:")
             for p in pending[:5]:
@@ -1250,6 +1254,9 @@ def run_scan_loop(parallel: int = DEFAULT_PARALLEL):
                             log(f"  {project['code']}: FAILED", "ERROR")
                     except Exception as e:
                         log(f"  {project['code']}: EXCEPTION - {e}", "ERROR")
+
+            # Reset progress after batch
+            update_progress(code="", step="Waiting", percent=0, clip_current=0, clip_total=0, status="idle")
 
         log(f"\n  Waiting {SCAN_INTERVAL}s... (Ctrl+C to stop)")
         try:
