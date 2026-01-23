@@ -393,6 +393,8 @@ class VE3ToolGUI:
             ("📂 VISUAL", lambda: os.startfile(VISUAL_DIR) if VISUAL_DIR.exists() else None, COLORS["bg_card_hover"]),
             ("📂 DONE", lambda: os.startfile(DONE_DIR) if DONE_DIR.exists() else None, COLORS["bg_card_hover"]),
             ("📂 VOICE", lambda: os.startfile(VOICE_DIR) if VOICE_DIR.exists() else None, COLORS["bg_card_hover"]),
+            ("⚙ Video", self.open_video_settings, COLORS["accent_blue"]),
+            ("⚙ Template", self.open_subtitle_settings, COLORS["accent_orange"]),
             ("⬆ Upload", self.upload_github, COLORS["accent_purple"]),
         ]
 
@@ -753,6 +755,609 @@ class VE3ToolGUI:
                 self.root.after(0, lambda: self.log(f"Upload error: {e}", "error"))
 
         threading.Thread(target=do_upload, daemon=True).start()
+
+    def open_subtitle_settings(self):
+        """Open subtitle template settings dialog."""
+        SubtitleTemplateDialog(self.root, self)
+
+    def open_video_settings(self):
+        """Open video settings dialog."""
+        VideoSettingsDialog(self.root, self)
+
+
+# ============================================================================
+# SUBTITLE TEMPLATE DIALOG
+# ============================================================================
+
+class SubtitleTemplateDialog:
+    """Dialog for managing edit templates (subtitle + video settings per channel)."""
+
+    TEMPLATES_FILE = TOOL_DIR / "subtitle_templates.json"
+
+    FONTS = [
+        "Bebas Neue",
+        "Inter Bold",
+        "Noto Serif",
+        "Anton",
+        "League Spartan ExtraBold",
+        "Montserrat",
+        "Nunito",
+        "Roboto Condensed",
+        "UTM Avo Bold",
+        "Zuume SemiBold"
+    ]
+
+    COLORS_PRESET = {
+        "White": "&H00FFFFFF",
+        "Yellow": "&H0000FFFF",
+        "Cyan": "&H00FFFF00",
+        "Green": "&H0000FF00",
+        "Red": "&H000000FF",
+        "Orange": "&H000080FF",
+        "Pink": "&H00FF00FF",
+        "Black": "&H00000000",
+    }
+
+    ALIGNMENTS = {
+        "Bottom Left": 1,
+        "Bottom Center": 2,
+        "Bottom Right": 3,
+        "Middle Left": 4,
+        "Middle Center": 5,
+        "Middle Right": 6,
+        "Top Left": 7,
+        "Top Center": 8,
+        "Top Right": 9,
+    }
+
+    # Video settings options
+    KB_INTENSITY = {
+        "Minimal (3%)": "minimal",
+        "Subtle (5%)": "subtle",
+        "Light (7%)": "light",
+        "Normal (10%)": "normal",
+        "Strong (15%)": "strong",
+    }
+
+    TRANSITIONS = {
+        "Random": "random",
+        "Fade Black": "fade_black",
+        "Mix/Crossfade": "mix",
+        "Wipe": "wipe",
+    }
+
+    DEFAULT_TEMPLATE = {
+        "font": "Bebas Neue",
+        "size": 28,
+        "color": "&H00FFFFFF",
+        "outline": "&H00000000",
+        "outline_size": 2,
+        "margin_v": 25,
+        "alignment": 2,
+        # Video settings
+        "ken_burns_intensity": "subtle",
+        "video_transition": "random",
+    }
+
+    def __init__(self, parent, app):
+        self.app = app
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("Edit Template - Channel Settings")
+        self.dialog.configure(bg=COLORS["bg_dark"])
+        self.dialog.geometry("520x780")
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        self.templates = self.load_templates()
+        self.current_channel = None
+
+        self.create_ui()
+
+        # Center dialog
+        self.dialog.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() - self.dialog.winfo_width()) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - self.dialog.winfo_height()) // 2
+        self.dialog.geometry(f"+{x}+{y}")
+
+    def load_templates(self):
+        if self.TEMPLATES_FILE.exists():
+            try:
+                with open(self.TEMPLATES_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except:
+                pass
+        return {}
+
+    def save_templates(self):
+        try:
+            with open(self.TEMPLATES_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.templates, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            self.app.log(f"Error saving templates: {e}", "error")
+
+    def create_ui(self):
+        main = tk.Frame(self.dialog, bg=COLORS["bg_dark"])
+        main.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        # Header
+        tk.Label(main, text="⚙ Edit Template (Channel)", font=("Segoe UI", 14, "bold"),
+                bg=COLORS["bg_dark"], fg=COLORS["text"]).pack(anchor=tk.W, pady=(0, 15))
+
+        # Channel selection
+        channel_frame = tk.Frame(main, bg=COLORS["bg_dark"])
+        channel_frame.pack(fill=tk.X, pady=(0, 15))
+
+        tk.Label(channel_frame, text="Channel:", font=("Segoe UI", 10),
+                bg=COLORS["bg_dark"], fg=COLORS["text"]).pack(side=tk.LEFT)
+
+        self.channel_var = tk.StringVar()
+        self.channel_entry = tk.Entry(channel_frame, textvariable=self.channel_var,
+                                      font=("Segoe UI", 10), width=15,
+                                      bg=COLORS["bg_card"], fg=COLORS["text"],
+                                      insertbackground=COLORS["text"])
+        self.channel_entry.pack(side=tk.LEFT, padx=(10, 10))
+
+        # Existing channels dropdown
+        existing = list(self.templates.keys())
+        if existing:
+            self.channel_combo = ttk.Combobox(channel_frame, values=existing, width=15)
+            self.channel_combo.pack(side=tk.LEFT, padx=(0, 10))
+            self.channel_combo.bind("<<ComboboxSelected>>", self.on_channel_selected)
+
+        load_btn = tk.Button(channel_frame, text="Load", command=self.load_channel,
+                            bg=COLORS["accent_blue"], fg="white", relief=tk.FLAT)
+        load_btn.pack(side=tk.LEFT)
+
+        # Settings card
+        settings_frame = tk.Frame(main, bg=COLORS["bg_card"], highlightbackground=COLORS["border"],
+                                 highlightthickness=1)
+        settings_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+
+        inner = tk.Frame(settings_frame, bg=COLORS["bg_card"])
+        inner.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+
+        # Font
+        self._create_dropdown(inner, "Font:", self.FONTS, "font_var")
+
+        # Font Size
+        self._create_slider(inner, "Font Size:", 16, 72, "size_var", 28)
+
+        # Text Color
+        self._create_dropdown(inner, "Text Color:", list(self.COLORS_PRESET.keys()), "color_var")
+
+        # Outline Color
+        self._create_dropdown(inner, "Outline Color:", list(self.COLORS_PRESET.keys()), "outline_var")
+
+        # Outline Size
+        self._create_slider(inner, "Outline Size:", 0, 5, "outline_size_var", 2)
+
+        # Margin V
+        self._create_slider(inner, "Margin Bottom:", 10, 100, "margin_var", 25)
+
+        # Alignment
+        self._create_dropdown(inner, "Alignment:", list(self.ALIGNMENTS.keys()), "align_var")
+
+        # --- VIDEO SETTINGS SECTION ---
+        video_header = tk.Frame(inner, bg=COLORS["bg_card"])
+        video_header.pack(fill=tk.X, pady=(15, 5))
+        tk.Label(video_header, text="─── Video Effects ───", font=("Segoe UI", 10, "bold"),
+                bg=COLORS["bg_card"], fg=COLORS["accent_blue"]).pack(anchor=tk.W)
+
+        # Ken Burns Intensity
+        self._create_dropdown(inner, "Ken Burns:", list(self.KB_INTENSITY.keys()), "kb_var")
+
+        # Transition
+        self._create_dropdown(inner, "Transition:", list(self.TRANSITIONS.keys()), "transition_var")
+
+        # Preview
+        preview_frame = tk.Frame(inner, bg=COLORS["bg_dark"], height=60)
+        preview_frame.pack(fill=tk.X, pady=(15, 0))
+        preview_frame.pack_propagate(False)
+
+        self.preview_label = tk.Label(preview_frame, text="Sample Subtitle Text",
+                                     font=("Segoe UI", 14), bg=COLORS["bg_dark"],
+                                     fg=COLORS["text"])
+        self.preview_label.pack(expand=True)
+
+        # Buttons
+        btn_frame = tk.Frame(main, bg=COLORS["bg_dark"])
+        btn_frame.pack(fill=tk.X)
+
+        save_btn = ModernButton(btn_frame, "💾 Save", self.save_template,
+                               COLORS["accent_green"], width=100, height=36)
+        save_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        delete_btn = ModernButton(btn_frame, "🗑 Delete", self.delete_template,
+                                 COLORS["accent_red"], width=100, height=36)
+        delete_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        close_btn = ModernButton(btn_frame, "✖ Close", self.dialog.destroy,
+                                COLORS["bg_card_hover"], width=100, height=36)
+        close_btn.pack(side=tk.RIGHT)
+
+        # Set defaults
+        self.set_defaults()
+
+    def _create_dropdown(self, parent, label, options, var_name):
+        row = tk.Frame(parent, bg=COLORS["bg_card"])
+        row.pack(fill=tk.X, pady=5)
+
+        tk.Label(row, text=label, font=("Segoe UI", 10), width=15, anchor=tk.W,
+                bg=COLORS["bg_card"], fg=COLORS["text"]).pack(side=tk.LEFT)
+
+        var = tk.StringVar(value=options[0])
+        setattr(self, var_name, var)
+
+        combo = ttk.Combobox(row, textvariable=var, values=options, width=25, state="readonly")
+        combo.pack(side=tk.LEFT, padx=(10, 0))
+        combo.bind("<<ComboboxSelected>>", lambda e: self.update_preview())
+
+    def _create_slider(self, parent, label, min_val, max_val, var_name, default):
+        row = tk.Frame(parent, bg=COLORS["bg_card"])
+        row.pack(fill=tk.X, pady=5)
+
+        tk.Label(row, text=label, font=("Segoe UI", 10), width=15, anchor=tk.W,
+                bg=COLORS["bg_card"], fg=COLORS["text"]).pack(side=tk.LEFT)
+
+        var = tk.IntVar(value=default)
+        setattr(self, var_name, var)
+
+        slider = tk.Scale(row, from_=min_val, to=max_val, orient=tk.HORIZONTAL,
+                         variable=var, bg=COLORS["bg_card"], fg=COLORS["text"],
+                         highlightthickness=0, length=200, command=lambda v: self.update_preview())
+        slider.pack(side=tk.LEFT, padx=(10, 0))
+
+        value_label = tk.Label(row, textvariable=var, font=("Segoe UI", 10, "bold"),
+                              bg=COLORS["bg_card"], fg=COLORS["accent_blue"], width=4)
+        value_label.pack(side=tk.LEFT)
+
+    def set_defaults(self):
+        self.font_var.set("Bebas Neue")
+        self.size_var.set(28)
+        self.color_var.set("White")
+        self.outline_var.set("Black")
+        self.outline_size_var.set(2)
+        self.margin_var.set(25)
+        self.align_var.set("Bottom Center")
+        # Video defaults
+        self.kb_var.set("Subtle (5%)")
+        self.transition_var.set("Random")
+        self.update_preview()
+
+    def on_channel_selected(self, event):
+        channel = self.channel_combo.get()
+        self.channel_var.set(channel)
+        self.load_channel()
+
+    def load_channel(self):
+        channel = self.channel_var.get().strip().upper()
+        if not channel:
+            return
+
+        self.current_channel = channel
+
+        if channel in self.templates:
+            t = self.templates[channel]
+            self.font_var.set(t.get("font", "Bebas Neue"))
+            self.size_var.set(t.get("size", 28))
+
+            # Find color name from value
+            color_val = t.get("color", "&H00FFFFFF")
+            for name, val in self.COLORS_PRESET.items():
+                if val == color_val:
+                    self.color_var.set(name)
+                    break
+
+            outline_val = t.get("outline", "&H00000000")
+            for name, val in self.COLORS_PRESET.items():
+                if val == outline_val:
+                    self.outline_var.set(name)
+                    break
+
+            self.outline_size_var.set(t.get("outline_size", 2))
+            self.margin_var.set(t.get("margin_v", 25))
+
+            # Find alignment name
+            align_val = t.get("alignment", 2)
+            for name, val in self.ALIGNMENTS.items():
+                if val == align_val:
+                    self.align_var.set(name)
+                    break
+
+            # Load video settings
+            kb_val = t.get("ken_burns_intensity", "subtle")
+            for name, val in self.KB_INTENSITY.items():
+                if val == kb_val:
+                    self.kb_var.set(name)
+                    break
+
+            trans_val = t.get("video_transition", "random")
+            for name, val in self.TRANSITIONS.items():
+                if val == trans_val:
+                    self.transition_var.set(name)
+                    break
+
+            self.app.log(f"Loaded template: {channel}", "success")
+        else:
+            self.set_defaults()
+            self.app.log(f"New template: {channel}", "info")
+
+        self.update_preview()
+
+    def update_preview(self):
+        font_name = self.font_var.get()
+        size = max(10, min(24, self.size_var.get() // 2))  # Scale down for preview
+
+        # Map to system font
+        font_map = {
+            "Bebas Neue": "Arial Black",
+            "Inter Bold": "Arial",
+            "Noto Serif": "Times New Roman",
+            "Anton": "Impact",
+        }
+        system_font = font_map.get(font_name, "Segoe UI")
+
+        # Get colors
+        color_name = self.color_var.get()
+        # Convert ABGR to RGB for tkinter
+        abgr = self.COLORS_PRESET.get(color_name, "&H00FFFFFF")
+        # &H00RRGGBB -> extract RGB
+        if abgr.startswith("&H"):
+            hex_val = abgr[4:]  # Skip &H00
+            # ABGR format: last 6 chars are BBGGRR
+            b = hex_val[0:2]
+            g = hex_val[2:4]
+            r = hex_val[4:6]
+            tk_color = f"#{r}{g}{b}"
+        else:
+            tk_color = "#FFFFFF"
+
+        self.preview_label.config(font=(system_font, size, "bold"), fg=tk_color)
+
+    def save_template(self):
+        channel = self.channel_var.get().strip().upper()
+        if not channel:
+            messagebox.showwarning("Warning", "Please enter a channel name (e.g., KA1, KA2)")
+            return
+
+        template = {
+            "font": self.font_var.get(),
+            "size": self.size_var.get(),
+            "color": self.COLORS_PRESET.get(self.color_var.get(), "&H00FFFFFF"),
+            "outline": self.COLORS_PRESET.get(self.outline_var.get(), "&H00000000"),
+            "outline_size": self.outline_size_var.get(),
+            "margin_v": self.margin_var.get(),
+            "alignment": self.ALIGNMENTS.get(self.align_var.get(), 2),
+            # Video settings
+            "ken_burns_intensity": self.KB_INTENSITY.get(self.kb_var.get(), "subtle"),
+            "video_transition": self.TRANSITIONS.get(self.transition_var.get(), "random"),
+        }
+
+        self.templates[channel] = template
+        self.save_templates()
+        self.app.log(f"Saved template: {channel}", "success")
+
+        # Update combobox if exists
+        if hasattr(self, 'channel_combo'):
+            self.channel_combo['values'] = list(self.templates.keys())
+
+        messagebox.showinfo("Saved", f"Template for '{channel}' saved successfully!")
+
+    def delete_template(self):
+        channel = self.channel_var.get().strip().upper()
+        if not channel:
+            return
+
+        if channel in self.templates:
+            if messagebox.askyesno("Confirm", f"Delete template for '{channel}'?"):
+                del self.templates[channel]
+                self.save_templates()
+                self.app.log(f"Deleted template: {channel}", "warning")
+
+                if hasattr(self, 'channel_combo'):
+                    self.channel_combo['values'] = list(self.templates.keys())
+
+                self.channel_var.set("")
+                self.set_defaults()
+
+
+# ============================================================================
+# VIDEO SETTINGS DIALOG
+# ============================================================================
+
+class VideoSettingsDialog:
+    """Dialog for video composition settings."""
+
+    SETTINGS_FILE = TOOL_DIR / "config" / "settings.yaml"
+
+    RESOLUTIONS = {
+        "Auto (Recommended)": "auto",
+        "1080p (1920x1080)": "1080p",
+        "2K (2560x1440)": "2k",
+        "4K (3840x2160)": "4k",
+    }
+
+    COMPOSE_MODES = {
+        "Quality (OpenCV Ken Burns)": "quality",
+        "Balanced (Faster)": "balanced",
+        "Fast (FFmpeg only)": "fast",
+    }
+
+    FPS_OPTIONS = {
+        "24 fps (Cinematic)": 24,
+        "25 fps (PAL)": 25,
+        "30 fps (Smooth)": 30,
+    }
+
+    KB_INTENSITY = {
+        "Minimal (3% zoom)": "minimal",
+        "Subtle (5% zoom) - Recommended": "subtle",
+        "Light (7% zoom)": "light",
+        "Normal (10% zoom)": "normal",
+        "Strong (15% zoom)": "strong",
+    }
+
+    TRANSITIONS = {
+        "Random (Mixed) - Recommended": "random",
+        "Fade Black (qua màu đen)": "fade_black",
+        "Mix/Crossfade (chồng mờ)": "mix",
+        "Wipe (trượt ngang)": "wipe",
+    }
+
+    def __init__(self, parent, app):
+        self.app = app
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("Video Settings")
+        self.dialog.configure(bg=COLORS["bg_dark"])
+        self.dialog.geometry("480x780")
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        self.settings = self.load_settings()
+        self.create_ui()
+
+        # Center dialog
+        self.dialog.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() - self.dialog.winfo_width()) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - self.dialog.winfo_height()) // 2
+        self.dialog.geometry(f"+{x}+{y}")
+
+    def load_settings(self):
+        if self.SETTINGS_FILE.exists():
+            try:
+                import yaml
+                with open(self.SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    return yaml.safe_load(f) or {}
+            except:
+                pass
+        return {}
+
+    def save_settings(self):
+        try:
+            import yaml
+            # Load existing settings
+            if self.SETTINGS_FILE.exists():
+                with open(self.SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    settings = yaml.safe_load(f) or {}
+            else:
+                settings = {}
+
+            # Update video settings
+            settings["output_resolution"] = self.resolution_var.get()
+            settings["video_compose_mode"] = self.compose_var.get()
+            settings["output_fps"] = self.fps_var.get()
+            settings["ken_burns_intensity"] = self.intensity_var.get()
+            settings["video_transition"] = self.transition_var.get()
+
+            with open(self.SETTINGS_FILE, "w", encoding="utf-8") as f:
+                yaml.dump(settings, f, default_flow_style=False, allow_unicode=True)
+
+            return True
+        except Exception as e:
+            self.app.log(f"Error saving settings: {e}", "error")
+            return False
+
+    def create_ui(self):
+        main = tk.Frame(self.dialog, bg=COLORS["bg_dark"])
+        main.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        # Header
+        tk.Label(main, text="⚙ Video Settings", font=("Segoe UI", 14, "bold"),
+                bg=COLORS["bg_dark"], fg=COLORS["text"]).pack(anchor=tk.W, pady=(0, 15))
+
+        # Settings card
+        settings_frame = tk.Frame(main, bg=COLORS["bg_card"],
+                                 highlightbackground=COLORS["border"], highlightthickness=1)
+        settings_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+
+        inner = tk.Frame(settings_frame, bg=COLORS["bg_card"])
+        inner.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+
+        # Output Resolution
+        self._create_section(inner, "Output Resolution",
+                            "Choose based on your input image quality. Auto recommended.")
+        self.resolution_var = tk.StringVar(value=self.settings.get("output_resolution", "1080p"))
+        for label, value in self.RESOLUTIONS.items():
+            rb = tk.Radiobutton(inner, text=label, variable=self.resolution_var, value=value,
+                               bg=COLORS["bg_card"], fg=COLORS["text"],
+                               selectcolor=COLORS["bg_dark"], activebackground=COLORS["bg_card"],
+                               activeforeground=COLORS["text"], font=("Segoe UI", 10))
+            rb.pack(anchor=tk.W, padx=(20, 0))
+
+        # Compose Mode
+        self._create_section(inner, "Compose Mode",
+                            "Quality = best Ken Burns effect, Fast = minimal processing")
+        self.compose_var = tk.StringVar(value=self.settings.get("video_compose_mode", "quality"))
+        for label, value in self.COMPOSE_MODES.items():
+            rb = tk.Radiobutton(inner, text=label, variable=self.compose_var, value=value,
+                               bg=COLORS["bg_card"], fg=COLORS["text"],
+                               selectcolor=COLORS["bg_dark"], activebackground=COLORS["bg_card"],
+                               activeforeground=COLORS["text"], font=("Segoe UI", 10))
+            rb.pack(anchor=tk.W, padx=(20, 0))
+
+        # Ken Burns Intensity
+        self._create_section(inner, "Ken Burns Intensity",
+                            "How much zoom/pan movement. Lower = less crop, smoother")
+        self.intensity_var = tk.StringVar(value=self.settings.get("ken_burns_intensity", "subtle"))
+        for label, value in self.KB_INTENSITY.items():
+            rb = tk.Radiobutton(inner, text=label, variable=self.intensity_var, value=value,
+                               bg=COLORS["bg_card"], fg=COLORS["text"],
+                               selectcolor=COLORS["bg_dark"], activebackground=COLORS["bg_card"],
+                               activeforeground=COLORS["text"], font=("Segoe UI", 10))
+            rb.pack(anchor=tk.W, padx=(20, 0))
+
+        # Transition
+        self._create_section(inner, "Scene Transition",
+                            "Effect when switching between images/videos")
+        self.transition_var = tk.StringVar(value=self.settings.get("video_transition", "random"))
+        for label, value in self.TRANSITIONS.items():
+            rb = tk.Radiobutton(inner, text=label, variable=self.transition_var, value=value,
+                               bg=COLORS["bg_card"], fg=COLORS["text"],
+                               selectcolor=COLORS["bg_dark"], activebackground=COLORS["bg_card"],
+                               activeforeground=COLORS["text"], font=("Segoe UI", 10))
+            rb.pack(anchor=tk.W, padx=(20, 0))
+
+        # FPS
+        self._create_section(inner, "Output FPS",
+                            "30fps smoother, 24fps more cinematic")
+        self.fps_var = tk.IntVar(value=self.settings.get("output_fps", 30))
+        fps_frame = tk.Frame(inner, bg=COLORS["bg_card"])
+        fps_frame.pack(anchor=tk.W, padx=(20, 0))
+        for label, value in self.FPS_OPTIONS.items():
+            rb = tk.Radiobutton(fps_frame, text=label, variable=self.fps_var, value=value,
+                               bg=COLORS["bg_card"], fg=COLORS["text"],
+                               selectcolor=COLORS["bg_dark"], activebackground=COLORS["bg_card"],
+                               activeforeground=COLORS["text"], font=("Segoe UI", 10))
+            rb.pack(side=tk.LEFT, padx=(0, 15))
+
+        # Buttons
+        btn_frame = tk.Frame(main, bg=COLORS["bg_dark"])
+        btn_frame.pack(fill=tk.X)
+
+        save_btn = ModernButton(btn_frame, "💾 Save", self.save_and_close,
+                               COLORS["accent_green"], width=100, height=36)
+        save_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        close_btn = ModernButton(btn_frame, "✖ Close", self.dialog.destroy,
+                                COLORS["bg_card_hover"], width=100, height=36)
+        close_btn.pack(side=tk.RIGHT)
+
+    def _create_section(self, parent, title, description):
+        """Create a section with title and description."""
+        frame = tk.Frame(parent, bg=COLORS["bg_card"])
+        frame.pack(fill=tk.X, pady=(10, 5))
+
+        tk.Label(frame, text=title, font=("Segoe UI", 11, "bold"),
+                bg=COLORS["bg_card"], fg=COLORS["text"]).pack(anchor=tk.W)
+        tk.Label(frame, text=description, font=("Segoe UI", 9),
+                bg=COLORS["bg_card"], fg=COLORS["text_dim"]).pack(anchor=tk.W)
+
+    def save_and_close(self):
+        if self.save_settings():
+            self.app.log(f"Video settings saved: {self.resolution_var.get()}, {self.compose_var.get()}, {self.fps_var.get()}fps", "success")
+            messagebox.showinfo("Saved", "Video settings saved successfully!")
+            self.dialog.destroy()
+
 
 # ============================================================================
 # MAIN

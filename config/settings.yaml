@@ -158,25 +158,50 @@ max_scene_duration: 8
 # ============================================================================
 
 # Chế độ edit: "quality", "balanced", "fast"
-# - quality: Ken Burns đầy đủ + easing mượt (chậm nhất, đẹp nhất)
-# - balanced: Ken Burns đơn giản hóa (cân bằng tốc độ/chất lượng) [KHUYÊN DÙNG]
-# - fast: Chỉ fade in/out, không zoom/pan (nhanh nhất)
+# - quality: Ken Burns OpenCV (mượt nhất, chậm nhất) [MẶC ĐỊNH]
+# - balanced: Ken Burns OpenCV với ít frames hơn (cân bằng)
+# - fast: FFmpeg zoompan filter (nhanh, chất lượng thấp hơn)
 #
-# Thời gian ước tính cho 100 clips:
-#   RTX 4070/3060: quality ~8 phút, balanced ~3 phút, fast ~1 phút
-#   CPU only:      quality ~30 phút, balanced ~15 phút, fast ~5 phút
-video_compose_mode: "fast"
+# Thời gian ước tính cho 100 clips @ 1080p:
+#   GPU: quality ~10 phút, balanced ~5 phút, fast ~2 phút
+#   CPU: quality ~25 phút, balanced ~12 phút, fast ~5 phút
+video_compose_mode: "quality"
+
+# Output resolution: "1080p", "2k", "4k", "auto"
+# - 1080p: 1920x1080 (phù hợp với input 1376x768)
+# - 2k: 2560x1440
+# - 4k: 3840x2160 (cần input ảnh lớn)
+# - auto: Tự động chọn dựa trên input (khuyên dùng)
+# Với input 1376x768, "auto" sẽ chọn 1080p để tránh upscale quá nhiều
+output_resolution: "1080p"
+
+# FPS output (24, 25, 30)
+# 30fps mượt hơn, 24fps cinematic hơn
+output_fps: 30
 
 # ============================================================================
 # KEN BURNS EFFECTS - Hiệu ứng zoom/pan cho ảnh tĩnh
 # ============================================================================
 # Chỉ áp dụng khi video_compose_mode = "quality" hoặc "balanced"
 
-# Cường độ hiệu ứng: "subtle", "normal", "strong"
-# - subtle: Zoom 6%, pan 4% - rất nhẹ, gần như tĩnh
-# - normal: Zoom 12%, pan 8% - cân bằng (mặc định)
-# - strong: Zoom 18%, pan 12% - mạnh hơn, chuyển động rõ ràng
-ken_burns_intensity: "normal"
+# Cường độ hiệu ứng: "minimal", "subtle", "light", "normal", "strong"
+# - minimal: Zoom 3% - rất nhẹ, giữ gần như toàn bộ ảnh
+# - subtle: Zoom 5% - nhẹ nhàng, êm dịu [MẶC ĐỊNH]
+# - light: Zoom 7% - chuyển động nhẹ
+# - normal: Zoom 10% - chuyển động rõ ràng
+# - strong: Zoom 15% - mạnh, dramatic
+ken_burns_intensity: "subtle"
+
+# Hiệu ứng chuyển cảnh giữa các clip
+# - fade_black: Chuyển qua màu đen (mỗi clip fade out → đen → fade in)
+# - mix: Crossfade/Dissolve (2 clip chồng mờ dần vào nhau, mượt hơn)
+# - wipe: Wipe nhẹ nhàng (trượt sang ngang)
+# - random: Random giữa các hiệu ứng trên [MẶC ĐỊNH]
+#   Tỷ lệ: fade_black 40%, mix 45%, wipe 15%
+video_transition: "random"
+
+# Thời gian chuyển cảnh (giây)
+transition_duration: 0.5
 
 # Whisper Settings (Voice to SRT)
 # Models: tiny, base, small, medium, large, large-v2, large-v3

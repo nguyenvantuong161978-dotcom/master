@@ -27,6 +27,14 @@ from typing import List, Dict, Optional, Tuple, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from enum import Enum
 
+# Import Ken Burns CV2 module
+try:
+    from modules.ken_burns_cv2 import KenBurnsCv2, QUALITY_PRESETS
+    KEN_BURNS_CV2_AVAILABLE = True
+except ImportError:
+    KEN_BURNS_CV2_AVAILABLE = False
+    print("[WARN] ken_burns_cv2 module not found, using FFmpeg fallback")
+
 # ============================================================================
 # CONFIG
 # ============================================================================
@@ -96,6 +104,112 @@ def update_progress(code: str = None, step: str = None, percent: int = None,
 def log(msg: str, level: str = "INFO"):
     timestamp = time.strftime("%H:%M:%S")
     print(f"[{timestamp}] [{level}] {msg}")
+
+
+# ============================================================================
+# SUBTITLE TEMPLATE SYSTEM
+# ============================================================================
+
+SUBTITLE_TEMPLATES_FILE = TOOL_DIR / "subtitle_templates.json"
+
+# Default template (used when no channel-specific template exists)
+DEFAULT_SUBTITLE_TEMPLATE = {
+    "font": "Bebas Neue",
+    "size": 28,
+    "color": "&H00FFFFFF",      # White (ABGR format)
+    "outline": "&H00000000",    # Black outline
+    "outline_size": 2,
+    "margin_v": 25,
+    "alignment": 2,             # 2 = bottom center
+    # Video settings (optional - uses global config if not set)
+    # "ken_burns_intensity": "subtle",
+    # "video_transition": "random",
+}
+
+# Available fonts in fonts/ folder
+AVAILABLE_FONTS = [
+    "Bebas Neue",
+    "Inter Bold",
+    "Noto Serif",
+    "Anton",
+    "League Spartan ExtraBold",
+    "Montserrat",
+    "Nunito",
+    "Roboto Condensed",
+    "UTM Avo Bold",
+    "Zuume SemiBold"
+]
+
+# Alignment options: 1=left, 2=center, 3=right (bottom row)
+# 4=left, 5=center, 6=right (middle row)
+# 7=left, 8=center, 9=right (top row)
+ALIGNMENT_OPTIONS = {
+    "bottom_left": 1,
+    "bottom_center": 2,
+    "bottom_right": 3,
+    "middle_left": 4,
+    "middle_center": 5,
+    "middle_right": 6,
+    "top_left": 7,
+    "top_center": 8,
+    "top_right": 9
+}
+
+
+def load_subtitle_templates() -> Dict:
+    """Load subtitle templates from JSON file."""
+    if SUBTITLE_TEMPLATES_FILE.exists():
+        try:
+            with open(SUBTITLE_TEMPLATES_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            pass
+    return {}
+
+
+def save_subtitle_templates(templates: Dict):
+    """Save subtitle templates to JSON file."""
+    try:
+        with open(SUBTITLE_TEMPLATES_FILE, "w", encoding="utf-8") as f:
+            json.dump(templates, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        log(f"Error saving templates: {e}", "ERROR")
+
+
+def get_subtitle_template(code: str) -> Dict:
+    """Get subtitle template for a channel based on code prefix (e.g., KA1, KA2)."""
+    templates = load_subtitle_templates()
+
+    # Extract channel prefix (e.g., "KA1" from "KA1-0023")
+    channel = code.split("-")[0] if "-" in code else code
+
+    # Look for exact channel match
+    if channel in templates:
+        template = DEFAULT_SUBTITLE_TEMPLATE.copy()
+        template.update(templates[channel])
+        return template
+
+    # Look for base channel (e.g., "KA" from "KA1")
+    base_channel = ''.join(c for c in channel if not c.isdigit())
+    if base_channel in templates:
+        template = DEFAULT_SUBTITLE_TEMPLATE.copy()
+        template.update(templates[base_channel])
+        return template
+
+    return DEFAULT_SUBTITLE_TEMPLATE.copy()
+
+
+def set_subtitle_template(channel: str, template: Dict):
+    """Set subtitle template for a channel."""
+    templates = load_subtitle_templates()
+    templates[channel] = template
+    save_subtitle_templates(templates)
+    log(f"Saved template for channel: {channel}")
+
+
+def get_all_templates() -> Dict:
+    """Get all saved templates."""
+    return load_subtitle_templates()
 
 
 def normalize_code(code: str) -> str:
@@ -759,26 +873,50 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
         temp_dir = tempfile.mkdtemp()
         try:
             temp_video = Path(temp_dir) / "temp_video.mp4"
-            FADE_DURATION = 0.4
 
-            # Load settings
-            compose_mode = "fast"
-            kb_intensity = "normal"
+            # Load settings from global config
+            compose_mode = "quality"  # Default to quality mode
+            output_resolution = "1080p"
+            output_fps = 30
+            kb_intensity = "subtle"  # Default to subtle for gentle movement
+            video_transition = "random"  # fade_black, mix, wipe, random
+            transition_duration = 0.5
             try:
                 import yaml
                 config_path = TOOL_DIR / "config" / "settings.yaml"
                 if config_path.exists():
                     with open(config_path, 'r', encoding='utf-8') as f:
                         config = yaml.safe_load(f) or {}
-                    compose_mode = config.get('video_compose_mode', 'fast').lower()
-                    kb_intensity = config.get('ken_burns_intensity', 'normal')
+                    compose_mode = config.get('video_compose_mode', 'quality').lower()
+                    output_resolution = config.get('output_resolution', '1080p').lower()
+                    output_fps = config.get('output_fps', 30)
+                    kb_intensity = config.get('ken_burns_intensity', 'subtle').lower()
+                    video_transition = config.get('video_transition', 'random').lower()
+                    transition_duration = config.get('transition_duration', 0.5)
             except:
                 pass
 
-            kb_enabled = compose_mode in ["quality", "balanced"]
-            use_simple_kb = compose_mode == "balanced"
+            # Override with channel-specific template settings (if defined)
+            channel_template = get_subtitle_template(code)
+            using_channel_template = False
+            if "ken_burns_intensity" in channel_template:
+                kb_intensity = channel_template["ken_burns_intensity"].lower()
+                using_channel_template = True
+            if "video_transition" in channel_template:
+                video_transition = channel_template["video_transition"].lower()
+                using_channel_template = True
+            if using_channel_template:
+                channel = code.split("-")[0] if "-" in code else code
+                plog(f"  Using channel template: {channel}")
 
-            # Detect GPU
+            # Determine if using xfade transitions (mix/wipe need xfade filter)
+            use_xfade = video_transition in ["mix", "wipe", "random"]
+            FADE_DURATION = transition_duration if use_xfade else 0.4
+
+            # Use OpenCV Ken Burns for quality/balanced modes
+            use_opencv_kb = KEN_BURNS_CV2_AVAILABLE and compose_mode in ["quality", "balanced"]
+
+            # Detect GPU for FFmpeg fallback
             use_gpu = False
             gpu_encoder = "libx264"
             try:
@@ -790,10 +928,41 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             except:
                 pass
 
-            ken_burns = KenBurnsGenerator(1920, 1080, intensity=kb_intensity)
-            last_kb_effect = None
+            # Initialize Ken Burns generator
+            # For xfade transitions, don't apply individual clip fades (xfade handles it)
+            clip_fade_duration = 0.0 if use_xfade else FADE_DURATION
+            if use_opencv_kb:
+                ken_burns = KenBurnsCv2(
+                    output_resolution=output_resolution,
+                    fps=output_fps,
+                    fade_duration=clip_fade_duration,
+                    intensity=kb_intensity
+                )
+                plog(f"  Ken Burns intensity: {kb_intensity.upper()}")
+                # Determine output size
+                if output_resolution == "auto":
+                    # Use first media to detect
+                    first_media = media_items[0]['path']
+                    import cv2
+                    if media_items[0]['is_video']:
+                        cap = cv2.VideoCapture(str(first_media))
+                        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                        cap.release()
+                    else:
+                        img = cv2.imread(str(first_media))
+                        h, w = img.shape[:2]
+                    output_size = ken_burns.detect_optimal_resolution(w, h)
+                else:
+                    output_size = QUALITY_PRESETS.get(output_resolution, QUALITY_PRESETS["1080p"])
+                plog(f"  Output: {output_size[0]}x{output_size[1]} @ {output_fps}fps")
+            else:
+                # Fallback to FFmpeg Ken Burns
+                ken_burns = KenBurnsGenerator(1920, 1080, intensity="normal")
+                output_size = (1920, 1080)
 
-            plog(f"  Compose mode: {compose_mode.upper()}")
+            plog(f"  Compose mode: {compose_mode.upper()} ({'OpenCV' if use_opencv_kb else 'FFmpeg'})")
+            plog(f"  Transition: {video_transition.upper()} ({transition_duration}s)")
             plog(f"  Creating {len(media_items)} clips...")
             total_clips = len(media_items)
             update_progress(step="Creating clips", percent=5, clip_total=total_clips)
@@ -801,80 +970,92 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             clip_paths = []
             for i, item in enumerate(media_items):
                 clip_path = Path(temp_dir) / f"clip_{i:03d}.mp4"
-                abs_path = str(Path(item['path']).resolve()).replace('\\', '/')
+                media_path = Path(item['path'])
                 target_duration = item['duration']
 
-                # Random transition: fade_black (50%) or mix (50%)
-                fade_out_start = max(0, target_duration - FADE_DURATION)
-                if random.random() < 0.5:
-                    # Fade to black
-                    fade_filter = f"fade=t=in:st=0:d={FADE_DURATION},fade=t=out:st={fade_out_start}:d={FADE_DURATION}"
-                else:
-                    # Crossfade/mix
-                    fade_filter = f"fade=t=in:st=0:d={FADE_DURATION}:alpha=1,fade=t=out:st={fade_out_start}:d={FADE_DURATION}:alpha=1"
+                success = False
 
                 if item['is_video']:
-                    probe_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                                "-of", "default=noprint_wrappers=1:nokey=1", abs_path]
-                    probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
-                    video_duration = float(probe_result.stdout.strip()) if probe_result.stdout.strip() else 8.0
+                    # Process VIDEO clip with high quality
+                    if use_opencv_kb:
+                        # Use OpenCV for high quality video processing
+                        success = ken_burns.process_video_clip(
+                            media_path, clip_path, target_duration, output_size
+                        )
 
-                    if fade_filter:
-                        base_vf = f"scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,{fade_filter}"
-                    else:
-                        base_vf = f"scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2"
+                    if not success:
+                        # Fallback to FFmpeg
+                        abs_path = str(media_path.resolve()).replace('\\', '/')
+                        probe_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                    "-of", "default=noprint_wrappers=1:nokey=1", abs_path]
+                        probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
+                        video_duration = float(probe_result.stdout.strip()) if probe_result.stdout.strip() else 8.0
 
-                    v_encoder = gpu_encoder if use_gpu else "libx264"
-                    v_preset = ["-preset", "p4"] if use_gpu else ["-preset", "fast"]
+                        out_w, out_h = output_size
+                        base_vf = f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2"
+                        if use_xfade:
+                            vf = base_vf  # No individual fade, xfade handles transition
+                        else:
+                            fade_filter = f"fade=t=in:st=0:d={FADE_DURATION},fade=t=out:st={max(0, target_duration - FADE_DURATION)}:d={FADE_DURATION}"
+                            vf = f"{base_vf},{fade_filter}"
 
-                    if video_duration > target_duration:
-                        trim_total = video_duration - target_duration
-                        trim_start = trim_total / 2
-                        cmd_clip = [
-                            "ffmpeg", "-y", "-ss", str(trim_start), "-i", abs_path,
-                            "-t", str(target_duration), "-vf", base_vf,
-                            "-c:v", v_encoder, *v_preset, "-pix_fmt", "yuv420p",
-                            "-an", "-r", "25", str(clip_path)
-                        ]
-                    else:
-                        cmd_clip = [
-                            "ffmpeg", "-y", "-i", abs_path, "-t", str(target_duration),
-                            "-vf", base_vf, "-c:v", v_encoder, *v_preset,
-                            "-pix_fmt", "yuv420p", "-an", "-r", "25", str(clip_path)
-                        ]
+                        v_encoder = gpu_encoder if use_gpu else "libx264"
+                        v_preset = ["-preset", "p4"] if use_gpu else ["-preset", "medium"]
+
+                        if video_duration > target_duration:
+                            trim_start = (video_duration - target_duration) / 2
+                            cmd_clip = [
+                                "ffmpeg", "-y", "-ss", str(trim_start), "-i", abs_path,
+                                "-t", str(target_duration), "-vf", vf,
+                                "-c:v", v_encoder, *v_preset, "-pix_fmt", "yuv420p",
+                                "-an", "-r", str(output_fps), str(clip_path)
+                            ]
+                        else:
+                            cmd_clip = [
+                                "ffmpeg", "-y", "-i", abs_path, "-t", str(target_duration),
+                                "-vf", vf, "-c:v", v_encoder, *v_preset,
+                                "-pix_fmt", "yuv420p", "-an", "-r", str(output_fps), str(clip_path)
+                            ]
+
+                        result = subprocess.run(cmd_clip, capture_output=True, text=True, timeout=300, creationflags=SUBPROCESS_FLAGS)
+                        success = result.returncode == 0
+                        if not success:
+                            plog(f"  Clip {i} (video) failed: {result.stderr[-200:]}", "ERROR")
                 else:
-                    MAX_KB_DURATION = 20
-                    use_kb_for_this_clip = kb_enabled and target_duration <= MAX_KB_DURATION
+                    # Process IMAGE with Ken Burns effect
+                    if use_opencv_kb:
+                        # Use OpenCV Ken Burns (high quality)
+                        success = ken_burns.create_clip_from_image(
+                            media_path, clip_path, target_duration,
+                            effect=None,  # Random effect
+                            output_size=output_size
+                        )
 
-                    if use_kb_for_this_clip:
-                        kb_effect = ken_burns.get_random_effect(exclude_last=last_kb_effect)
-                        last_kb_effect = kb_effect
-                        vf = ken_burns.generate_filter(kb_effect, target_duration, FADE_DURATION, simple_mode=use_simple_kb)
-                    else:
-                        base_filter = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2"
-                        vf = f"{base_filter},{fade_filter}" if fade_filter else base_filter
+                    if not success:
+                        # Fallback to FFmpeg
+                        abs_path = str(media_path.resolve()).replace('\\', '/')
+                        out_w, out_h = output_size
+                        base_filter = f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2"
+                        if use_xfade:
+                            vf = base_filter  # No individual fade, xfade handles transition
+                        else:
+                            fade_filter = f"fade=t=in:st=0:d={FADE_DURATION},fade=t=out:st={max(0, target_duration - FADE_DURATION)}:d={FADE_DURATION}"
+                            vf = f"{base_filter},{fade_filter}"
 
-                    if use_gpu:
-                        nvenc_preset = "p1" if compose_mode == "fast" else "p4"
-                        cmd_clip = [
-                            "ffmpeg", "-y", "-loop", "1", "-t", str(target_duration),
-                            "-i", abs_path, "-vf", vf, "-c:v", gpu_encoder,
-                            "-preset", nvenc_preset, "-pix_fmt", "yuv420p", "-r", "25", str(clip_path)
-                        ]
-                    else:
-                        cpu_preset = "ultrafast" if compose_mode == "fast" else "fast"
+                        cpu_preset = "ultrafast" if compose_mode == "fast" else "medium"
                         cmd_clip = [
                             "ffmpeg", "-y", "-loop", "1", "-t", str(target_duration),
                             "-i", abs_path, "-vf", vf, "-c:v", "libx264",
-                            "-preset", cpu_preset, "-pix_fmt", "yuv420p", "-r", "25", str(clip_path)
+                            "-preset", cpu_preset, "-pix_fmt", "yuv420p", "-r", str(output_fps), str(clip_path)
                         ]
 
-                result = subprocess.run(cmd_clip, capture_output=True, text=True, timeout=300, creationflags=SUBPROCESS_FLAGS)
-                if result.returncode != 0:
-                    plog(f"  Clip {i} failed: {result.stderr[-200:]}", "ERROR")
-                    continue
+                        result = subprocess.run(cmd_clip, capture_output=True, text=True, timeout=300, creationflags=SUBPROCESS_FLAGS)
+                        success = result.returncode == 0
+                        if not success:
+                            plog(f"  Clip {i} (image) failed: {result.stderr[-200:]}", "ERROR")
 
-                clip_paths.append(clip_path)
+                if success and clip_path.exists():
+                    clip_paths.append(clip_path)
 
                 # Update progress (clips = 5-70% of total)
                 clip_percent = 5 + int((i + 1) / total_clips * 65)
@@ -889,16 +1070,95 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             plog(f"  Created {len(clip_paths)} clips, concatenating...")
             update_progress(step="Concatenating", percent=75)
 
-            # Concat
-            list_file = Path(temp_dir) / "clips.txt"
-            with open(list_file, 'w', encoding='utf-8') as f:
-                for cp in clip_paths:
-                    f.write(f"file '{str(cp).replace(chr(92), '/')}'\n")
+            # Concat with appropriate transition
+            if use_xfade and len(clip_paths) > 1:
+                # Use xfade filter for smooth transitions
+                # Build xfade filter chain
+                def get_xfade_type(transition_setting):
+                    """Get xfade transition type"""
+                    if transition_setting == "mix":
+                        return "dissolve"
+                    elif transition_setting == "wipe":
+                        return random.choice(["wipeleft", "wiperight", "wipeup", "wipedown"])
+                    elif transition_setting == "random":
+                        # 40% fade_black, 45% mix, 15% wipe
+                        r = random.random()
+                        if r < 0.40:
+                            return "fade"  # fade through black
+                        elif r < 0.85:
+                            return "dissolve"  # crossfade
+                        else:
+                            return random.choice(["wipeleft", "wiperight"])
+                    return "dissolve"
 
-            cmd_concat = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(temp_video)]
-            result = subprocess.run(cmd_concat, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
-            if result.returncode != 0:
-                return False, None, f"Concat error: {result.stderr[-200:]}"
+                # Get clip durations for offset calculation
+                clip_durations = []
+                for cp in clip_paths:
+                    probe_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                "-of", "default=noprint_wrappers=1:nokey=1", str(cp)]
+                    probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
+                    dur = float(probe_result.stdout.strip()) if probe_result.stdout.strip() else 5.0
+                    clip_durations.append(dur)
+
+                # Build FFmpeg command with xfade
+                inputs = []
+                for cp in clip_paths:
+                    inputs.extend(["-i", str(cp).replace('\\', '/')])
+
+                # Build filter_complex for xfade chain
+                filter_parts = []
+                current_offset = 0
+                prev_label = "[0]"
+
+                for i in range(1, len(clip_paths)):
+                    xfade_type = get_xfade_type(video_transition)
+                    # Offset = sum of previous durations minus transition overlaps
+                    current_offset += clip_durations[i-1] - transition_duration
+                    out_label = f"[v{i}]" if i < len(clip_paths) - 1 else "[vout]"
+                    filter_parts.append(
+                        f"{prev_label}[{i}]xfade=transition={xfade_type}:duration={transition_duration}:offset={current_offset:.3f}{out_label}"
+                    )
+                    prev_label = out_label
+
+                filter_complex = ";".join(filter_parts)
+
+                # Build and run xfade command
+                v_encoder = gpu_encoder if use_gpu else "libx264"
+                v_preset = ["-preset", "p4"] if use_gpu else ["-preset", "medium"]
+
+                cmd_concat = ["ffmpeg", "-y"] + inputs + [
+                    "-filter_complex", filter_complex,
+                    "-map", "[vout]",
+                    "-c:v", v_encoder, *v_preset,
+                    "-pix_fmt", "yuv420p",
+                    "-r", str(output_fps),
+                    str(temp_video)
+                ]
+
+                plog(f"  Using xfade transitions ({video_transition})...")
+                result = subprocess.run(cmd_concat, capture_output=True, text=True, timeout=600, creationflags=SUBPROCESS_FLAGS)
+                if result.returncode != 0:
+                    plog(f"  xfade failed, falling back to simple concat", "WARN")
+                    # Fallback to simple concat
+                    list_file = Path(temp_dir) / "clips.txt"
+                    with open(list_file, 'w', encoding='utf-8') as f:
+                        for cp in clip_paths:
+                            f.write(f"file '{str(cp).replace(chr(92), '/')}'\n")
+                    cmd_concat = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(temp_video)]
+                    result = subprocess.run(cmd_concat, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
+                    if result.returncode != 0:
+                        return False, None, f"Concat error: {result.stderr[-200:]}"
+            else:
+                # Simple concat (for fade_black or single clip)
+                list_file = Path(temp_dir) / "clips.txt"
+                with open(list_file, 'w', encoding='utf-8') as f:
+                    for cp in clip_paths:
+                        f.write(f"file '{str(cp).replace(chr(92), '/')}'\n")
+
+                cmd_concat = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(temp_video)]
+                result = subprocess.run(cmd_concat, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
+                if result.returncode != 0:
+                    return False, None, f"Concat error: {result.stderr[-200:]}"
 
             # Add audio
             temp_with_audio = Path(temp_dir) / "with_audio.mp4"
@@ -916,12 +1176,16 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                 plog("  Burning subtitles...")
                 srt_escaped = str(srt_path).replace('\\', '/').replace(':', '\\:')
 
-                # Use default font (no custom font path - works on all machines)
+                # Use local fonts from fonts/ folder with channel template
+                fonts_dir = str(TOOL_DIR / "fonts").replace('\\', '/').replace(':', '\\:')
+                template = get_subtitle_template(code)
                 subtitle_style = (
-                    "FontSize=28,PrimaryColour=&H00FFFFFF,"
-                    "OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,MarginV=25,Alignment=2"
+                    f"FontName={template['font']},FontSize={template['size']},"
+                    f"PrimaryColour={template['color']},OutlineColour={template['outline']},"
+                    f"BorderStyle=1,Outline={template['outline_size']},Shadow=1,"
+                    f"MarginV={template['margin_v']},Alignment={template['alignment']}"
                 )
-                vf_filter = f"subtitles='{srt_escaped}':force_style='{subtitle_style}'"
+                vf_filter = f"subtitles='{srt_escaped}':fontsdir='{fonts_dir}':force_style='{subtitle_style}'"
 
                 cmd3 = ["ffmpeg", "-y", "-i", str(temp_with_audio), "-vf", vf_filter, "-c:a", "copy", str(output_path)]
                 result = subprocess.run(cmd3, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)

@@ -1,0 +1,11 @@
+{
+  "KA2": {
+    "font": "Bebas Neue",
+    "size": 28,
+    "color": "&H00FFFFFF",
+    "outline": "&H00000000",
+    "outline_size": 2,
+    "margin_v": 25,
+    "alignment": 2
+  }
+}
