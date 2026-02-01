@@ -48,6 +48,7 @@ PROGRESS_FILE = TOOL_DIR / "progress.json"
 
 SCAN_INTERVAL = 30  # Scan every 30 seconds for new projects
 DEFAULT_PARALLEL = 4
+CLIP_WORKERS = 3  # Number of parallel workers for clip creation (3 workers ~ 90% CPU)
 
 # Google Sheet config
 SOURCE_SHEET_NAME = "NGUON"
@@ -121,9 +122,17 @@ DEFAULT_SUBTITLE_TEMPLATE = {
     "outline_size": 2,
     "margin_v": 25,
     "alignment": 2,             # 2 = bottom center
-    # Video settings (optional - uses global config if not set)
-    # "ken_burns_intensity": "subtle",
-    # "video_transition": "random",
+    # Video settings (per channel)
+    "output_resolution": "4k",
+    "compose_mode": "quality",
+    "ken_burns_intensity": "subtle",
+    "video_transition": "random",
+    # NV overlay settings
+    "nv_overlay_enabled": True,
+    "nv_overlay_position": "left",
+    "nv_overlay_v_position": "middle",
+    "nv_overlay_scale": 0.50,
+    "nv_crop_ratio": 0.5,  # Crop right portion (0.5 = right half, 1.0 = full image)
 }
 
 # Available fonts in fonts/ folder
@@ -446,10 +455,15 @@ def get_existing_media(img_dir: Path) -> Dict[str, Path]:
 
 def fill_missing_media(project_dir: Path, excel_path: Path) -> Tuple[int, int]:
     """Fill missing media by copying random existing media files."""
+    # Support both VM structure (img\ subfolder) and direct structure
     img_dir = project_dir / "img"
-
     if not img_dir.exists():
-        log(f"  [FILL] No img folder found", "WARN")
+        img_dir = project_dir  # Fallback to root folder
+
+    # Check if there are any media files
+    has_media = any(img_dir.glob("*.mp4")) or any(img_dir.glob("*.png")) or any(img_dir.glob("*.jpg"))
+    if not has_media:
+        log(f"  [FILL] No media found in project", "WARN")
         return 0, 0
 
     required_ids = get_required_scene_ids(excel_path)
@@ -522,12 +536,19 @@ def get_project_info(project_dir: Path) -> Dict:
     info["audio_path"] = audio_path if audio_path.exists() else None
     info["excel_path"] = excel_path if excel_path.exists() else None
 
+    # Support both VM structure (img\ subfolder) and direct structure
     img_dir = project_dir / "img"
+    if not img_dir.exists():
+        img_dir = project_dir  # Fallback to root folder
+
     if img_dir.exists():
         videos = [f for f in img_dir.glob("*.mp4")
                   if not f.stem.startswith('nv') and not f.stem.startswith('loc')]
-        images = [f for f in img_dir.glob("*.png")
-                  if not f.stem.startswith('nv') and not f.stem.startswith('loc')]
+        # Support multiple image formats
+        images = []
+        for ext in ["*.png", "*.jpg", "*.jpeg", "*.webp"]:
+            images.extend([f for f in img_dir.glob(ext)
+                          if not f.stem.startswith('nv') and not f.stem.startswith('loc')])
         info["video_count"] = len(videos)
         info["image_count"] = len(images)
         info["media_count"] = len(videos) + len(images)
@@ -553,8 +574,10 @@ def get_project_info(project_dir: Path) -> Dict:
                 if filled > 0:
                     videos = [f for f in img_dir.glob("*.mp4")
                               if not f.stem.startswith('nv') and not f.stem.startswith('loc')]
-                    images = [f for f in img_dir.glob("*.png")
-                              if not f.stem.startswith('nv') and not f.stem.startswith('loc')]
+                    images = []
+                    for ext in ["*.png", "*.jpg", "*.jpeg", "*.webp"]:
+                        images.extend([f for f in img_dir.glob(ext)
+                                      if not f.stem.startswith('nv') and not f.stem.startswith('loc')])
                     info["video_count"] = len(videos)
                     info["image_count"] = len(images)
                     info["media_count"] = len(videos) + len(images)
@@ -738,7 +761,13 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
         srt_path = process_srt_for_video(srt_path, processed_srt, max_chars=50)
 
     output_path = project_dir / f"{code}.mp4"
+
+    # Support both VM structure (img\ subfolder) and direct structure
     img_dir = project_dir / "img"
+    if not img_dir.exists():
+        # Fallback to project_dir itself if no img\ subfolder
+        img_dir = project_dir
+        plog(f"  Using root folder for media (no img\\ subfolder)")
 
     plog(f"  Voice: {voice_path.name}")
     plog(f"  SRT: {srt_path.name if srt_path else 'None'}")
@@ -799,17 +828,22 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
 
             for sid in possible_ids:
                 video_path = img_dir / f"{sid}.mp4"
-                img_path = img_dir / f"{sid}.png"
 
                 if video_path.exists():
                     media_path = video_path
                     is_video = True
                     video_count += 1
                     break
-                elif img_path.exists():
-                    media_path = img_path
-                    is_video = False
-                    image_count += 1
+
+                # Check multiple image formats
+                for img_ext in [".png", ".jpg", ".jpeg", ".webp"]:
+                    img_path = img_dir / f"{sid}{img_ext}"
+                    if img_path.exists():
+                        media_path = img_path
+                        is_video = False
+                        image_count += 1
+                        break
+                if media_path:
                     break
 
             if not media_path:
@@ -874,40 +908,36 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
         try:
             temp_video = Path(temp_dir) / "temp_video.mp4"
 
-            # Load settings from global config
-            compose_mode = "quality"  # Default to quality mode
-            output_resolution = "1080p"
-            output_fps = 30
-            kb_intensity = "subtle"  # Default to subtle for gentle movement
-            video_transition = "random"  # fade_black, mix, wipe, random
+            # Load settings from channel template (per-channel customization)
+            channel_template = get_subtitle_template(code)
+            channel = code.split("-")[0] if "-" in code else code
+
+            # Video settings from template (with defaults)
+            output_resolution = channel_template.get("output_resolution", "4k").lower()
+            compose_mode = channel_template.get("compose_mode", "quality").lower()
+            kb_intensity = channel_template.get("ken_burns_intensity", "subtle").lower()
+            video_transition = channel_template.get("video_transition", "random").lower()
+            output_fps = 30  # Fixed FPS
             transition_duration = 0.5
+
+            # Fallback to global config if no template settings
             try:
                 import yaml
                 config_path = TOOL_DIR / "config" / "settings.yaml"
                 if config_path.exists():
                     with open(config_path, 'r', encoding='utf-8') as f:
                         config = yaml.safe_load(f) or {}
-                    compose_mode = config.get('video_compose_mode', 'quality').lower()
-                    output_resolution = config.get('output_resolution', '1080p').lower()
+                    # Only use global config if not set in template
+                    if "output_resolution" not in channel_template:
+                        output_resolution = config.get('output_resolution', '4k').lower()
+                    if "compose_mode" not in channel_template:
+                        compose_mode = config.get('video_compose_mode', 'quality').lower()
                     output_fps = config.get('output_fps', 30)
-                    kb_intensity = config.get('ken_burns_intensity', 'subtle').lower()
-                    video_transition = config.get('video_transition', 'random').lower()
                     transition_duration = config.get('transition_duration', 0.5)
             except:
                 pass
 
-            # Override with channel-specific template settings (if defined)
-            channel_template = get_subtitle_template(code)
-            using_channel_template = False
-            if "ken_burns_intensity" in channel_template:
-                kb_intensity = channel_template["ken_burns_intensity"].lower()
-                using_channel_template = True
-            if "video_transition" in channel_template:
-                video_transition = channel_template["video_transition"].lower()
-                using_channel_template = True
-            if using_channel_template:
-                channel = code.split("-")[0] if "-" in code else code
-                plog(f"  Using channel template: {channel}")
+            plog(f"  Channel: {channel} | Res: {output_resolution.upper()} | Mode: {compose_mode}")
 
             # Determine if using xfade transitions (mix/wipe need xfade filter)
             use_xfade = video_transition in ["mix", "wipe", "random"]
@@ -963,24 +993,38 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
 
             plog(f"  Compose mode: {compose_mode.upper()} ({'OpenCV' if use_opencv_kb else 'FFmpeg'})")
             plog(f"  Transition: {video_transition.upper()} ({transition_duration}s)")
-            plog(f"  Creating {len(media_items)} clips...")
+            plog(f"  Creating {len(media_items)} clips with {CLIP_WORKERS} parallel workers...")
             total_clips = len(media_items)
             update_progress(step="Creating clips", percent=5, clip_total=total_clips)
 
-            clip_paths = []
-            for i, item in enumerate(media_items):
-                clip_path = Path(temp_dir) / f"clip_{i:03d}.mp4"
-                media_path = Path(item['path'])
-                target_duration = item['duration']
-
+            # Helper function for creating a single clip
+            def create_single_clip(task_args):
+                """Create a single clip - runs in parallel worker."""
+                (idx, item_data, clip_path_str, kb_config) = task_args
+                clip_path = Path(clip_path_str)
+                media_path = Path(item_data['path'])
+                target_duration = item_data['duration']
+                is_video = item_data['is_video']
                 success = False
 
-                if item['is_video']:
-                    # Process VIDEO clip with high quality
-                    if use_opencv_kb:
-                        # Use OpenCV for high quality video processing
-                        success = ken_burns.process_video_clip(
-                            media_path, clip_path, target_duration, output_size
+                # Create worker-local Ken Burns instance for thread safety
+                worker_kb = None
+                if kb_config['use_opencv']:
+                    try:
+                        worker_kb = KenBurnsCv2(
+                            output_resolution=kb_config['resolution'],
+                            fps=kb_config['fps'],
+                            fade_duration=kb_config['fade_duration'],
+                            intensity=kb_config['intensity']
+                        )
+                    except:
+                        pass
+
+                if is_video:
+                    # Process VIDEO clip
+                    if worker_kb:
+                        success = worker_kb.process_video_clip(
+                            media_path, clip_path, target_duration, kb_config['output_size']
                         )
 
                     if not success:
@@ -991,16 +1035,15 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                         probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
                         video_duration = float(probe_result.stdout.strip()) if probe_result.stdout.strip() else 8.0
 
-                        out_w, out_h = output_size
+                        out_w, out_h = kb_config['output_size']
                         base_vf = f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2"
-                        if use_xfade:
-                            vf = base_vf  # No individual fade, xfade handles transition
+                        if kb_config['use_xfade']:
+                            vf = base_vf
                         else:
-                            fade_filter = f"fade=t=in:st=0:d={FADE_DURATION},fade=t=out:st={max(0, target_duration - FADE_DURATION)}:d={FADE_DURATION}"
-                            vf = f"{base_vf},{fade_filter}"
+                            vf = f"{base_vf},fade=t=in:st=0:d={kb_config['fade_dur']},fade=t=out:st={max(0, target_duration - kb_config['fade_dur'])}:d={kb_config['fade_dur']}"
 
-                        v_encoder = gpu_encoder if use_gpu else "libx264"
-                        v_preset = ["-preset", "p4"] if use_gpu else ["-preset", "medium"]
+                        v_encoder = kb_config['gpu_encoder'] if kb_config['use_gpu'] else "libx264"
+                        v_preset = ["-preset", "p4"] if kb_config['use_gpu'] else ["-preset", "medium"]
 
                         if video_duration > target_duration:
                             trim_start = (video_duration - target_duration) / 2
@@ -1008,66 +1051,146 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                                 "ffmpeg", "-y", "-ss", str(trim_start), "-i", abs_path,
                                 "-t", str(target_duration), "-vf", vf,
                                 "-c:v", v_encoder, *v_preset, "-pix_fmt", "yuv420p",
-                                "-an", "-r", str(output_fps), str(clip_path)
+                                "-an", "-r", str(kb_config['fps']), str(clip_path)
                             ]
                         else:
                             cmd_clip = [
                                 "ffmpeg", "-y", "-i", abs_path, "-t", str(target_duration),
                                 "-vf", vf, "-c:v", v_encoder, *v_preset,
-                                "-pix_fmt", "yuv420p", "-an", "-r", str(output_fps), str(clip_path)
+                                "-pix_fmt", "yuv420p", "-an", "-r", str(kb_config['fps']), str(clip_path)
                             ]
 
                         result = subprocess.run(cmd_clip, capture_output=True, text=True, timeout=300, creationflags=SUBPROCESS_FLAGS)
                         success = result.returncode == 0
-                        if not success:
-                            plog(f"  Clip {i} (video) failed: {result.stderr[-200:]}", "ERROR")
                 else:
                     # Process IMAGE with Ken Burns effect
-                    if use_opencv_kb:
-                        # Use OpenCV Ken Burns (high quality)
-                        success = ken_burns.create_clip_from_image(
+                    if worker_kb:
+                        success = worker_kb.create_clip_from_image(
                             media_path, clip_path, target_duration,
-                            effect=None,  # Random effect
-                            output_size=output_size
+                            effect=None,
+                            output_size=kb_config['output_size']
                         )
 
                     if not success:
                         # Fallback to FFmpeg
                         abs_path = str(media_path.resolve()).replace('\\', '/')
-                        out_w, out_h = output_size
+                        out_w, out_h = kb_config['output_size']
                         base_filter = f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2"
-                        if use_xfade:
-                            vf = base_filter  # No individual fade, xfade handles transition
+                        if kb_config['use_xfade']:
+                            vf = base_filter
                         else:
-                            fade_filter = f"fade=t=in:st=0:d={FADE_DURATION},fade=t=out:st={max(0, target_duration - FADE_DURATION)}:d={FADE_DURATION}"
-                            vf = f"{base_filter},{fade_filter}"
+                            vf = f"{base_filter},fade=t=in:st=0:d={kb_config['fade_dur']},fade=t=out:st={max(0, target_duration - kb_config['fade_dur'])}:d={kb_config['fade_dur']}"
 
-                        cpu_preset = "ultrafast" if compose_mode == "fast" else "medium"
-                        cmd_clip = [
-                            "ffmpeg", "-y", "-loop", "1", "-t", str(target_duration),
-                            "-i", abs_path, "-vf", vf, "-c:v", "libx264",
-                            "-preset", cpu_preset, "-pix_fmt", "yuv420p", "-r", str(output_fps), str(clip_path)
-                        ]
+                        if kb_config['use_gpu']:
+                            cmd_clip = [
+                                "ffmpeg", "-y", "-loop", "1", "-t", str(target_duration),
+                                "-i", abs_path, "-vf", vf, "-c:v", kb_config['gpu_encoder'],
+                                "-preset", "p4", "-rc", "vbr", "-cq", "22",
+                                "-pix_fmt", "yuv420p", "-r", str(kb_config['fps']), str(clip_path)
+                            ]
+                        else:
+                            cpu_preset = "ultrafast" if kb_config['compose_mode'] == "fast" else "medium"
+                            cmd_clip = [
+                                "ffmpeg", "-y", "-loop", "1", "-t", str(target_duration),
+                                "-i", abs_path, "-vf", vf, "-c:v", "libx264",
+                                "-preset", cpu_preset, "-pix_fmt", "yuv420p", "-r", str(kb_config['fps']), str(clip_path)
+                            ]
 
                         result = subprocess.run(cmd_clip, capture_output=True, text=True, timeout=300, creationflags=SUBPROCESS_FLAGS)
                         success = result.returncode == 0
-                        if not success:
-                            plog(f"  Clip {i} (image) failed: {result.stderr[-200:]}", "ERROR")
 
-                if success and clip_path.exists():
-                    clip_paths.append(clip_path)
+                return (idx, success, str(clip_path) if success and clip_path.exists() else None)
 
-                # Update progress (clips = 5-70% of total)
-                clip_percent = 5 + int((i + 1) / total_clips * 65)
-                update_progress(clip_current=i+1, percent=clip_percent)
+            # Prepare config for workers
+            kb_config = {
+                'use_opencv': use_opencv_kb,
+                'resolution': output_resolution,
+                'fps': output_fps,
+                'fade_duration': clip_fade_duration,
+                'intensity': kb_intensity,
+                'output_size': output_size,
+                'use_xfade': use_xfade,
+                'fade_dur': FADE_DURATION,
+                'use_gpu': use_gpu,
+                'gpu_encoder': gpu_encoder,
+                'compose_mode': compose_mode,
+            }
 
-                if (i + 1) % 10 == 0:
-                    plog(f"  ... {i + 1}/{total_clips} clips")
+            # Create task list
+            clip_tasks = []
+            for i, item in enumerate(media_items):
+                clip_path = Path(temp_dir) / f"clip_{i:03d}.mp4"
+                clip_tasks.append((i, item, str(clip_path), kb_config))
+
+            # Process clips in parallel
+            clip_results = [None] * total_clips
+            completed_count = 0
+
+            with ThreadPoolExecutor(max_workers=CLIP_WORKERS) as executor:
+                futures = {executor.submit(create_single_clip, task): task[0] for task in clip_tasks}
+
+                for future in as_completed(futures):
+                    idx, success, clip_path_str = future.result()
+                    if success and clip_path_str:
+                        clip_results[idx] = Path(clip_path_str)
+
+                    completed_count += 1
+                    clip_percent = 5 + int(completed_count / total_clips * 65)
+                    update_progress(clip_current=completed_count, percent=clip_percent)
+
+                    if completed_count % 20 == 0:
+                        plog(f"  ... {completed_count}/{total_clips} clips")
+
+            # Collect successful clips in order
+            clip_paths = [p for p in clip_results if p is not None]
 
             if not clip_paths:
                 return False, None, "No clips created"
 
-            plog(f"  Created {len(clip_paths)} clips, concatenating...")
+            plog(f"  Created {len(clip_paths)} clips...")
+
+            # Re-encode clips for high quality xfade (avoid artifacts during crossfade)
+            # Only needed when using xfade transitions
+            if use_xfade and len(clip_paths) > 1:
+                plog(f"  Re-encoding clips for smooth crossfade...")
+                update_progress(step="Optimizing clips", percent=72)
+
+                reencoded_paths = []
+                for i, cp in enumerate(clip_paths):
+                    reenc_path = Path(temp_dir) / f"hq_{i:03d}.mp4"
+
+                    # Re-encode with high quality, consistent format
+                    if use_gpu:
+                        reencode_cmd = [
+                            "ffmpeg", "-y", "-i", str(cp),
+                            "-c:v", gpu_encoder, "-preset", "p5",
+                            "-rc", "vbr", "-cq", "18", "-b:v", "20M",
+                            "-pix_fmt", "yuv420p", "-an",
+                            str(reenc_path)
+                        ]
+                    else:
+                        reencode_cmd = [
+                            "ffmpeg", "-y", "-i", str(cp),
+                            "-c:v", "libx264", "-preset", "fast", "-crf", "17",
+                            "-profile:v", "high", "-pix_fmt", "yuv420p", "-an",
+                            str(reenc_path)
+                        ]
+
+                    result = subprocess.run(reencode_cmd, capture_output=True, text=True, timeout=120, creationflags=SUBPROCESS_FLAGS)
+                    if result.returncode == 0 and reenc_path.exists():
+                        reencoded_paths.append(reenc_path)
+                        # Delete original to save space
+                        try:
+                            cp.unlink()
+                        except:
+                            pass
+                    else:
+                        # Keep original if re-encode fails
+                        reencoded_paths.append(cp)
+
+                clip_paths = reencoded_paths
+                plog(f"  Re-encoded {len(clip_paths)} clips")
+
             update_progress(step="Concatenating", percent=75)
 
             # Concat with appropriate transition
@@ -1091,53 +1214,101 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                             return random.choice(["wipeleft", "wiperight"])
                     return "dissolve"
 
-                # Get clip durations for offset calculation
-                clip_durations = []
-                for cp in clip_paths:
-                    probe_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                                "-of", "default=noprint_wrappers=1:nokey=1", str(cp)]
-                    probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
-                    dur = float(probe_result.stdout.strip()) if probe_result.stdout.strip() else 5.0
-                    clip_durations.append(dur)
+                def xfade_batch(batch_clips, batch_idx, temp_dir_path):
+                    """Process a batch of clips with xfade transitions"""
+                    if len(batch_clips) == 1:
+                        return batch_clips[0]  # Single clip, no xfade needed
 
-                # Build FFmpeg command with xfade
-                inputs = []
-                for cp in clip_paths:
-                    inputs.extend(["-i", str(cp).replace('\\', '/')])
+                    # Get clip durations
+                    batch_durations = []
+                    for cp in batch_clips:
+                        probe_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                    "-of", "default=noprint_wrappers=1:nokey=1", str(cp)]
+                        probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
+                        dur = float(probe_result.stdout.strip()) if probe_result.stdout.strip() else 5.0
+                        batch_durations.append(dur)
 
-                # Build filter_complex for xfade chain
-                filter_parts = []
-                current_offset = 0
-                prev_label = "[0]"
+                    # Build inputs
+                    inputs = []
+                    for cp in batch_clips:
+                        inputs.extend(["-i", str(cp).replace('\\', '/')])
 
-                for i in range(1, len(clip_paths)):
-                    xfade_type = get_xfade_type(video_transition)
-                    # Offset = sum of previous durations minus transition overlaps
-                    current_offset += clip_durations[i-1] - transition_duration
-                    out_label = f"[v{i}]" if i < len(clip_paths) - 1 else "[vout]"
-                    filter_parts.append(
-                        f"{prev_label}[{i}]xfade=transition={xfade_type}:duration={transition_duration}:offset={current_offset:.3f}{out_label}"
-                    )
-                    prev_label = out_label
+                    # Build filter_complex
+                    filter_parts = []
+                    current_offset = 0
+                    prev_label = "[0]"
 
-                filter_complex = ";".join(filter_parts)
+                    for i in range(1, len(batch_clips)):
+                        xfade_type = get_xfade_type(video_transition)
+                        current_offset += batch_durations[i-1] - transition_duration
+                        out_label = f"[v{i}]" if i < len(batch_clips) - 1 else "[vout]"
+                        filter_parts.append(
+                            f"{prev_label}[{i}]xfade=transition={xfade_type}:duration={transition_duration}:offset={current_offset:.3f}{out_label}"
+                        )
+                        prev_label = out_label
 
-                # Build and run xfade command
-                v_encoder = gpu_encoder if use_gpu else "libx264"
-                v_preset = ["-preset", "p4"] if use_gpu else ["-preset", "medium"]
+                    filter_complex = ";".join(filter_parts) + ";[vout]format=yuv420p[vfinal]"
 
-                cmd_concat = ["ffmpeg", "-y"] + inputs + [
-                    "-filter_complex", filter_complex,
-                    "-map", "[vout]",
-                    "-c:v", v_encoder, *v_preset,
-                    "-pix_fmt", "yuv420p",
-                    "-r", str(output_fps),
-                    str(temp_video)
-                ]
+                    # Encoder settings
+                    if use_gpu:
+                        v_encoder = gpu_encoder
+                        v_quality = ["-preset", "p5", "-rc", "vbr", "-cq", "20", "-b:v", "15M", "-maxrate", "20M"]
+                    else:
+                        v_encoder = "libx264"
+                        v_quality = ["-preset", "slow", "-crf", "18", "-profile:v", "high"]
 
-                plog(f"  Using xfade transitions ({video_transition})...")
-                result = subprocess.run(cmd_concat, capture_output=True, text=True, timeout=600, creationflags=SUBPROCESS_FLAGS)
-                if result.returncode != 0:
+                    batch_output = Path(temp_dir_path) / f"batch_{batch_idx:03d}.mp4"
+                    cmd_batch = ["ffmpeg", "-y"] + inputs + [
+                        "-filter_complex", filter_complex,
+                        "-map", "[vfinal]",
+                        "-c:v", v_encoder, *v_quality,
+                        "-pix_fmt", "yuv420p",
+                        "-r", str(output_fps),
+                        str(batch_output)
+                    ]
+
+                    result = subprocess.run(cmd_batch, capture_output=True, text=True, timeout=600, creationflags=SUBPROCESS_FLAGS)
+                    if result.returncode == 0 and batch_output.exists():
+                        return batch_output
+                    return None
+
+                # Process in batches to avoid Windows command line length limit
+                BATCH_SIZE = 40  # Safe batch size for Windows
+                xfade_success = False
+
+                if len(clip_paths) <= BATCH_SIZE:
+                    # Small video - process all at once
+                    plog(f"  Using xfade transitions ({video_transition})...")
+                    batch_output = xfade_batch(clip_paths, 0, temp_dir)
+                    if batch_output:
+                        shutil.move(str(batch_output), str(temp_video))
+                        xfade_success = True
+                else:
+                    # Large video - process in batches
+                    plog(f"  Processing {len(clip_paths)} clips in batches of {BATCH_SIZE}...")
+                    batch_outputs = []
+                    for batch_idx in range(0, len(clip_paths), BATCH_SIZE):
+                        batch_clips = clip_paths[batch_idx:batch_idx + BATCH_SIZE]
+                        plog(f"    Batch {batch_idx // BATCH_SIZE + 1}: clips {batch_idx + 1}-{batch_idx + len(batch_clips)}")
+                        batch_output = xfade_batch(batch_clips, batch_idx // BATCH_SIZE, temp_dir)
+                        if batch_output:
+                            batch_outputs.append(batch_output)
+                        else:
+                            plog(f"    Batch {batch_idx // BATCH_SIZE + 1} failed", "WARN")
+                            break
+
+                    if len(batch_outputs) == (len(clip_paths) + BATCH_SIZE - 1) // BATCH_SIZE:
+                        # All batches successful - concat them
+                        plog(f"  Combining {len(batch_outputs)} batches...")
+                        batch_list = Path(temp_dir) / "batches.txt"
+                        with open(batch_list, 'w', encoding='utf-8') as f:
+                            for bp in batch_outputs:
+                                f.write(f"file '{str(bp).replace(chr(92), '/')}'\n")
+                        cmd_final = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(batch_list), "-c", "copy", str(temp_video)]
+                        result = subprocess.run(cmd_final, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
+                        xfade_success = result.returncode == 0
+
+                if not xfade_success:
                     plog(f"  xfade failed, falling back to simple concat", "WARN")
                     # Fallback to simple concat
                     list_file = Path(temp_dir) / "clips.txt"
@@ -1171,8 +1342,9 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                 return False, None, f"Audio merge error: {result.stderr[-200:]}"
 
             # Burn subtitles
+            temp_with_subs = Path(temp_dir) / "with_subs.mp4"
             if srt_path and srt_path.exists():
-                update_progress(step="Burning subtitles", percent=92)
+                update_progress(step="Burning subtitles", percent=90)
                 plog("  Burning subtitles...")
                 srt_escaped = str(srt_path).replace('\\', '/').replace(':', '\\:')
 
@@ -1187,14 +1359,37 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                 )
                 vf_filter = f"subtitles='{srt_escaped}':fontsdir='{fonts_dir}':force_style='{subtitle_style}'"
 
-                cmd3 = ["ffmpeg", "-y", "-i", str(temp_with_audio), "-vf", vf_filter, "-c:a", "copy", str(output_path)]
+                cmd3 = ["ffmpeg", "-y", "-i", str(temp_with_audio), "-vf", vf_filter, "-c:a", "copy", str(temp_with_subs)]
                 result = subprocess.run(cmd3, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
                 if result.returncode != 0:
                     plog(f"  Subtitle burn failed: {result.stderr[-100:]}", "WARN")
                     # Fallback: copy without subtitles
-                    shutil.copy(temp_with_audio, output_path)
+                    shutil.copy(temp_with_audio, temp_with_subs)
             else:
-                shutil.copy(temp_with_audio, output_path)
+                shutil.copy(temp_with_audio, temp_with_subs)
+
+            # Overlay NV image (character card) if enabled in template
+            nv_enabled = channel_template.get("nv_overlay_enabled", True)
+            nv_position = channel_template.get("nv_overlay_position", "left")
+            nv_v_position = channel_template.get("nv_overlay_v_position", "middle")
+            nv_scale = channel_template.get("nv_overlay_scale", 0.50)
+            nv_crop_ratio = channel_template.get("nv_crop_ratio", 0.5)
+
+            nv_path = find_nv_image(code, project_dir) if nv_enabled else None
+            if nv_path:
+                update_progress(step="Adding NV overlay", percent=95)
+                plog(f"  Adding NV overlay: {nv_path.name} ({nv_position}-{nv_v_position}, {int(nv_scale*100)}%, crop={nv_crop_ratio})")
+                if overlay_nv_on_video(temp_with_subs, nv_path, output_path,
+                                       position=nv_position, v_position=nv_v_position,
+                                       scale=nv_scale, margin=20, crop_ratio=nv_crop_ratio,
+                                       callback=callback):
+                    plog("  NV overlay applied successfully")
+                else:
+                    # Fallback: use video without NV overlay
+                    shutil.copy(temp_with_subs, output_path)
+            else:
+                # No NV image or disabled, just copy the video with subtitles
+                shutil.copy(temp_with_subs, output_path)
 
             update_progress(step="Done", percent=100, status="completed")
             plog(f"  Video done: {output_path.name}", "OK")
@@ -1234,6 +1429,142 @@ def find_thumbnail(code: str) -> Optional[Path]:
     return None
 
 
+def find_nv_image(code: str, project_dir: Path) -> Optional[Path]:
+    """Find NV image (character card) for overlay."""
+    # Check in VISUAL project folder first
+    nv_in_project = project_dir / f"{code}_nv.png"
+    if nv_in_project.exists():
+        return nv_in_project
+
+    # Check in thumb/nv folder
+    nv_in_thumb = TOOL_DIR / "thumb" / "nv" / f"{code}.png"
+    if nv_in_thumb.exists():
+        return nv_in_thumb
+
+    return None
+
+
+def overlay_nv_on_video(video_path: Path, nv_path: Path, output_path: Path,
+                        position: str = "left", v_position: str = "middle",
+                        scale: float = 0.50, margin: int = 20,
+                        crop_ratio: float = 0.5, callback=None) -> bool:
+    """
+    Overlay NV image on video.
+
+    Args:
+        video_path: Input video
+        nv_path: NV image (character card with name badge)
+        output_path: Output video with overlay
+        position: "left" or "right" (horizontal)
+        v_position: "top", "middle", or "bottom" (vertical)
+        scale: Scale factor for NV image (0.50 = 50% of video height)
+        margin: Margin from edge in pixels
+        crop_ratio: Crop right portion of NV image (0.5 = right half, 1.0 = full image)
+    """
+    def plog(msg, level="INFO"):
+        if callback:
+            callback(msg, level)
+        else:
+            log(msg, level)
+
+    try:
+        # Get video dimensions
+        probe_cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=p=0:s=x",
+            str(video_path)
+        ]
+        result = subprocess.run(probe_cmd, capture_output=True, text=True,
+                               creationflags=SUBPROCESS_FLAGS)
+        if result.returncode != 0:
+            return False
+
+        dimensions = result.stdout.strip()
+        if 'x' not in dimensions:
+            return False
+
+        vid_w, vid_h = map(int, dimensions.split('x'))
+
+        # Calculate NV overlay size (scale relative to video height)
+        nv_height = int(vid_h * scale)
+
+        # Build filter: scale NV, then overlay
+        nv_escaped = str(nv_path).replace('\\', '/').replace(':', '\\:')
+
+        # Horizontal position
+        if position == "left":
+            x_pos = margin
+        else:
+            x_pos = f"W-w-{margin}"
+
+        # Vertical position
+        if v_position == "top":
+            y_pos = margin
+        elif v_position == "middle":
+            y_pos = "(H-h)/2"
+        else:  # bottom
+            y_pos = f"H-h-{margin}"
+
+        # Filter: crop right portion (if needed), scale NV to height, then overlay
+        if crop_ratio < 1.0:
+            # Crop to right portion: crop=width:height:x:y
+            crop_width = f"iw*{crop_ratio}"
+            crop_x = f"iw*{1.0 - crop_ratio}"
+            crop_filter = f"crop={crop_width}:ih:{crop_x}:0,"
+        else:
+            crop_filter = ""
+
+        filter_complex = (
+            f"[1:v]{crop_filter}scale=-1:{nv_height}[nv];"
+            f"[0:v][nv]overlay={x_pos}:{y_pos}"
+        )
+
+        # Detect GPU encoder
+        use_nvenc = False
+        try:
+            gpu_check = subprocess.run(["ffmpeg", "-encoders"], capture_output=True, text=True, timeout=5, creationflags=SUBPROCESS_FLAGS)
+            use_nvenc = "h264_nvenc" in gpu_check.stdout
+        except:
+            pass
+
+        if use_nvenc:
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(video_path),
+                "-i", str(nv_path),
+                "-filter_complex", filter_complex,
+                "-c:a", "copy",
+                "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "20",
+                str(output_path)
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(video_path),
+                "-i", str(nv_path),
+                "-filter_complex", filter_complex,
+                "-c:a", "copy",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                str(output_path)
+            ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=300, creationflags=SUBPROCESS_FLAGS)
+
+        if result.returncode == 0:
+            plog(f"  NV overlay added: {position}-{v_position}")
+            return True
+        else:
+            plog(f"  NV overlay failed: {result.stderr[-100:]}", "WARN")
+            return False
+
+    except Exception as e:
+        plog(f"  NV overlay error: {e}", "WARN")
+        return False
+
+
 def copy_to_done(project_info: Dict, video_path: Path, callback=None) -> Tuple[bool, Optional[str]]:
     code = project_info["code"]
     project_dir = project_info["path"]
@@ -1253,24 +1584,47 @@ def copy_to_done(project_info: Dict, video_path: Path, callback=None) -> Tuple[b
     done_folder.mkdir(parents=True, exist_ok=True)
     plog(f"Created: {done_folder}")
 
+    # 1. Copy video
     dst_video = done_folder / video_path.name
     shutil.copy2(video_path, dst_video)
     plog(f"Copied video: {dst_video.name}")
 
+    # 2. Copy SRT
     srt_path = project_info.get("srt_path")
     if srt_path and srt_path.exists():
         dst_srt = done_folder / f"{code}.srt"
         shutil.copy2(srt_path, dst_srt)
         plog(f"Copied SRT: {dst_srt.name}")
 
-    thumb_path = find_thumbnail(code)
-    if thumb_path:
-        dst_thumb = done_folder / thumb_path.name
-        shutil.copy2(thumb_path, dst_thumb)
+    # 3. Copy thumbnail (check multiple locations)
+    thumb_copied = False
+    # Check VISUAL folder first (generated by run_thumb.py)
+    thumb_in_visual = project_dir / f"{code}.jpg"
+    if thumb_in_visual.exists():
+        dst_thumb = done_folder / f"{code}_thumb.jpg"
+        shutil.copy2(thumb_in_visual, dst_thumb)
         plog(f"Copied thumbnail: {dst_thumb.name}")
+        thumb_copied = True
+
+    # Check thumb/thumbnails folder
+    if not thumb_copied:
+        thumb_in_tool = TOOL_DIR / "thumb" / "thumbnails" / f"{code}.jpg"
+        if thumb_in_tool.exists():
+            dst_thumb = done_folder / f"{code}_thumb.jpg"
+            shutil.copy2(thumb_in_tool, dst_thumb)
+            plog(f"Copied thumbnail: {dst_thumb.name}")
+            thumb_copied = True
+
+    # Fallback to global THUMB_DIR
+    if not thumb_copied:
+        thumb_path = find_thumbnail(code)
+        if thumb_path:
+            dst_thumb = done_folder / f"{code}_thumb{thumb_path.suffix}"
+            shutil.copy2(thumb_path, dst_thumb)
+            plog(f"Copied thumbnail: {dst_thumb.name}")
 
     files = list(done_folder.iterdir())
-    plog(f"Done folder has {len(files)} files")
+    plog(f"Done folder has {len(files)} files: {', '.join(f.name for f in files)}")
 
     return True, None
 
@@ -1430,6 +1784,74 @@ def update_sheet_status(codes: List[str], callback=None) -> Tuple[int, int]:
 # PROCESS PROJECT
 # ============================================================================
 
+def generate_thumbnail_for_project(project_info: Dict, callback=None) -> bool:
+    """Generate thumbnail for project if thumb folder exists."""
+    code = project_info["code"]
+    project_dir = project_info["path"]
+
+    def plog(msg, level="INFO"):
+        if callback:
+            callback(msg, level)
+        else:
+            log(f"[{code}] {msg}", level)
+
+    # Check for thumb folder in VISUAL project
+    thumb_folder = project_dir / "thumb"
+    if not thumb_folder.exists():
+        return False
+
+    # Find source image in thumb folder
+    valid_ext = {".png", ".jpg", ".jpeg", ".webp"}
+    source_img = None
+    for f in thumb_folder.iterdir():
+        if f.is_file() and f.suffix.lower() in valid_ext:
+            source_img = f
+            break
+
+    if not source_img:
+        plog("  No source image in thumb folder", "WARN")
+        return False
+
+    plog(f"  Found thumb source: {source_img.name}")
+
+    # Run thumbnail generation
+    try:
+        thumb_script = TOOL_DIR / "run_thumb.py"
+        if not thumb_script.exists():
+            plog("  run_thumb.py not found", "WARN")
+            return False
+
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, str(thumb_script), code],
+            capture_output=True, text=True, timeout=300,
+            creationflags=SUBPROCESS_FLAGS if sys.platform == "win32" else 0
+        )
+
+        if result.returncode == 0:
+            plog("  Thumbnail generated successfully")
+
+            # Copy generated thumbnail to DONE folder
+            thumb_output = TOOL_DIR / "thumb" / "thumbnails" / f"{code}.jpg"
+            if thumb_output.exists():
+                done_thumb = DONE_DIR / code / f"{code}_thumb.jpg"
+                if (DONE_DIR / code).exists():
+                    shutil.copy2(thumb_output, done_thumb)
+                    plog(f"  Copied thumbnail to DONE: {done_thumb.name}")
+
+            return True
+        else:
+            plog(f"  Thumbnail generation failed: {result.stderr[-200:] if result.stderr else 'Unknown error'}", "WARN")
+            return False
+
+    except subprocess.TimeoutExpired:
+        plog("  Thumbnail generation timed out", "WARN")
+        return False
+    except Exception as e:
+        plog(f"  Thumbnail error: {e}", "WARN")
+        return False
+
+
 def process_project(project_info: Dict, callback=None) -> bool:
     code = project_info["code"]
 
@@ -1454,6 +1876,9 @@ def process_project(project_info: Dict, callback=None) -> bool:
     if not success:
         plog(f"Copy failed: {error}", "ERROR")
         return False
+
+    # Generate thumbnail if thumb folder exists
+    generate_thumbnail_for_project(project_info, callback)
 
     delete_visual_project(project_info, callback)
 
