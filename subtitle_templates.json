@@ -1,11 +1,38 @@
 {
   "KA2": {
+    "output_resolution": "4k",
+    "video_transition": "random",
+    "ken_burns_intensity": "subtle",
+    "nv_overlay_enabled": true,
+    "nv_overlay_position": "left",
+    "nv_overlay_v_position": "middle",
+    "nv_overlay_scale": 0.5,
+    "nv_crop_ratio": 0.5,
     "font": "Bebas Neue",
     "size": 28,
     "color": "&H00FFFFFF",
     "outline": "&H00000000",
     "outline_size": 2,
     "margin_v": 25,
-    "alignment": 2
+    "alignment": 2,
+    "compose_mode": "quality"
+  },
+  "KA5-T2": {
+    "output_resolution": "4k",
+    "video_transition": "random",
+    "ken_burns_intensity": "subtle",
+    "nv_overlay_enabled": true,
+    "nv_overlay_position": "left",
+    "nv_overlay_v_position": "middle",
+    "nv_overlay_scale": 0.5,
+    "nv_crop_ratio": 0.5,
+    "font": "Bebas Neue",
+    "size": 28,
+    "color": "&H00FFFFFF",
+    "outline": "&H00000000",
+    "outline_size": 2,
+    "margin_v": 25,
+    "alignment": 2,
+    "compose_mode": "quality"
   }
 }

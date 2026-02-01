@@ -30,10 +30,49 @@ SCAN_INTERVAL = 30
 
 _print_lock = threading.Lock()
 
+# File stability check settings
+FILE_STABLE_CHECK_INTERVAL = 5  # Check every 5 seconds
+FILE_STABLE_DURATION = 30  # File must be stable for 30 seconds
+
 
 def safe_print(*args, **kwargs):
     with _print_lock:
         print(*args, **kwargs)
+
+
+def is_file_stable(file_path: Path, check_interval: int = FILE_STABLE_CHECK_INTERVAL,
+                   stable_duration: int = FILE_STABLE_DURATION) -> bool:
+    """Check if file size is stable (not changing) for a period of time.
+
+    Returns True if file hasn't changed size for stable_duration seconds.
+    Returns False if file is still being written/downloaded.
+    """
+    if not file_path.exists():
+        return False
+
+    checks_needed = stable_duration // check_interval
+    last_size = file_path.stat().st_size
+
+    for i in range(checks_needed):
+        time.sleep(check_interval)
+
+        if not file_path.exists():
+            return False
+
+        current_size = file_path.stat().st_size
+
+        if current_size != last_size:
+            # File is still changing, reset and continue monitoring
+            safe_print(f"  [WAIT] {file_path.name}: size changed {last_size} -> {current_size}, waiting...")
+            last_size = current_size
+            # Reset counter - start fresh monitoring
+            return is_file_stable(file_path, check_interval, stable_duration)
+
+        # Show progress
+        elapsed = (i + 1) * check_interval
+        safe_print(f"  [WAIT] {file_path.name}: stable for {elapsed}/{stable_duration}s...")
+
+    return True
 
 
 def get_logger(name: str = "ve3_tool") -> logging.Logger:
@@ -170,7 +209,13 @@ class VoiceToSrt:
 
     def _write_txt(self, result, srt_path):
         segments = result.get("segments", [])
-        txt_path = Path(srt_path).with_suffix(".txt")
+        srt_path = Path(srt_path)
+
+        # Handle .srt.tmp -> .txt.tmp
+        if srt_path.name.endswith('.srt.tmp'):
+            txt_path = srt_path.parent / (srt_path.stem.replace('.srt', '') + '.txt.tmp')
+        else:
+            txt_path = srt_path.with_suffix(".txt")
 
         full_text = " ".join([s.get("text", "").strip() for s in segments])
         full_text = re.sub(r'([.!?])([A-ZÀ-Ỹ])', r'\1 \2', full_text)
@@ -200,15 +245,24 @@ def delete_voice_source(voice_path: Path):
 
         for item in voice_dir.iterdir():
             if item.name.startswith(name):
-                try:
-                    if item.is_dir():
-                        shutil.rmtree(item)
-                    else:
-                        item.unlink()
-                    print(f"  Deleted: {item.name}")
-                    deleted_count += 1
-                except Exception as e:
-                    print(f"  Cannot delete {item.name}: {e}")
+                # Retry up to 3 times with delay for locked files
+                for attempt in range(3):
+                    try:
+                        if item.is_dir():
+                            shutil.rmtree(item)
+                        else:
+                            item.unlink()
+                        print(f"  Deleted: {item.name}")
+                        deleted_count += 1
+                        break
+                    except PermissionError:
+                        if attempt < 2:
+                            time.sleep(1)  # Wait 1s before retry
+                        else:
+                            print(f"  Cannot delete {item.name}: file in use (will retry later)")
+                    except Exception as e:
+                        print(f"  Cannot delete {item.name}: {e}")
+                        break
 
         parent_txt = parent_dir / f"{name}.txt"
         if parent_txt.exists():
@@ -225,34 +279,120 @@ def delete_voice_source(voice_path: Path):
         print(f"  Cleanup warning: {e}")
 
 
-def process_voice_to_srt(voice_path: Path) -> bool:
-    """Process voice file to SRT."""
-    name = voice_path.stem
-    is_from_source = PROJECTS_DIR not in voice_path.parents
+def copy_to_projects_atomic(name: str, voice_path: Path, local_srt: Path, local_txt: Path = None):
+    """Copy files to PROJECTS atomically using temp folder.
 
+    This prevents VM from seeing incomplete project folder:
+    1. Create PROJECTS/name.tmp/ folder
+    2. Copy all files there
+    3. Rename to PROJECTS/name/ when complete
+    """
     output_dir = PROJECTS_DIR / name
-    output_dir.mkdir(parents=True, exist_ok=True)
+    temp_dir = PROJECTS_DIR / f"{name}.tmp"
 
-    voice_copy = output_dir / voice_path.name
-    srt_path = output_dir / f"{name}.srt"
-
-    # Copy voice
-    if not voice_copy.exists():
-        safe_print(f"[SRT] {name}: Copying voice...")
-        shutil.copy2(voice_path, voice_copy)
-
-    # Copy txt if exists
-    txt_src = voice_path.parent / f"{name}.txt"
-    txt_dst = output_dir / f"{name}.txt"
-    if txt_src.exists() and not txt_dst.exists():
-        shutil.copy2(txt_src, txt_dst)
-
-    if srt_path.exists():
-        if is_from_source:
-            delete_voice_source(voice_path)
+    # Already done?
+    if output_dir.exists() and (output_dir / f"{name}.srt").exists():
         return True
 
-    safe_print(f"[SRT] {name}: Creating SRT (Whisper)...")
+    try:
+        # Clean up any existing temp folder
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+
+        # Create temp folder
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        # Copy SRT first (most important)
+        temp_srt = temp_dir / f"{name}.srt"
+        shutil.copy2(local_srt, temp_srt)
+
+        # Copy voice
+        temp_voice = temp_dir / voice_path.name
+        shutil.copy2(voice_path, temp_voice)
+
+        # Copy txt if exists
+        if local_txt and local_txt.exists():
+            temp_txt = temp_dir / f"{name}.txt"
+            shutil.copy2(local_txt, temp_txt)
+
+        # Remove existing output folder if any
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+
+        # Atomic rename: temp -> final (VM will only see complete folder)
+        temp_dir.rename(output_dir)
+
+        safe_print(f"[SRT] {name}: Copied to PROJECTS (atomic)")
+        return True
+
+    except Exception as e:
+        safe_print(f"[SRT] {name}: Copy to PROJECTS failed - {e}")
+        # Cleanup temp folder
+        if temp_dir.exists():
+            try:
+                shutil.rmtree(temp_dir)
+            except:
+                pass
+        return False
+
+
+def process_voice_to_srt(voice_path: Path) -> bool:
+    """Process voice file to SRT.
+
+    Flow:
+    1. Create SRT in voice folder (as .srt.tmp while processing)
+    2. When Whisper completes, rename .tmp to .srt
+    3. Copy voice + SRT to PROJECTS atomically (using temp folder)
+    4. Delete source voice files
+
+    This ensures:
+    - SRT only appears when fully complete
+    - VM only sees PROJECTS folder when all files are ready
+    """
+    name = voice_path.stem
+    voice_dir = voice_path.parent
+    is_from_source = PROJECTS_DIR not in voice_path.parents
+
+    # Paths in voice folder (where we create SRT first)
+    local_srt_tmp = voice_dir / f"{name}.srt.tmp"
+    local_srt = voice_dir / f"{name}.srt"
+    local_txt = voice_dir / f"{name}.txt"
+
+    # Paths in PROJECTS folder (final destination)
+    output_dir = PROJECTS_DIR / name
+    project_srt = output_dir / f"{name}.srt"
+
+    # Already done in PROJECTS?
+    if project_srt.exists():
+        return True
+
+    # Already have local SRT? Just copy to PROJECTS atomically
+    if local_srt.exists():
+        safe_print(f"[SRT] {name}: Local SRT found, copying to PROJECTS...")
+
+        # Check if .txt.tmp exists (leftover from failed previous run)
+        local_txt_tmp = voice_dir / f"{name}.txt.tmp"
+        if local_txt_tmp.exists():
+            safe_print(f"[SRT] {name}: Found leftover .txt.tmp, renaming...")
+            try:
+                if local_txt.exists():
+                    local_txt.unlink()
+                local_txt_tmp.rename(local_txt)
+            except Exception as e:
+                safe_print(f"[SRT] {name}: Cannot rename txt.tmp: {e}")
+
+        if copy_to_projects_atomic(name, voice_path, local_srt, local_txt):
+            return True
+        return False
+
+    # Check if voice file is stable (not being written/downloaded)
+    safe_print(f"[SRT] {name}: Checking if file is stable...")
+    if not is_file_stable(voice_path):
+        safe_print(f"[SRT] {name}: File is still changing, skipping for now...")
+        return False
+
+    # Create SRT in voice folder
+    safe_print(f"[SRT] {name}: File stable, creating SRT (Whisper)...")
     try:
         # Load settings
         whisper_model = 'medium'
@@ -269,15 +409,38 @@ def process_voice_to_srt(voice_path: Path) -> bool:
             pass
 
         conv = VoiceToSrt(model_name=whisper_model, language=whisper_lang)
-        conv.transcribe(str(voice_copy), str(srt_path))
-        safe_print(f"[SRT] {name}: Done")
 
-        if is_from_source:
-            delete_voice_source(voice_path)
+        # Create SRT as .tmp first (in voice folder)
+        conv.transcribe(str(voice_path), str(local_srt_tmp))
 
-        return True
+        # Rename .tmp to .srt (delete existing first if any)
+        if local_srt.exists():
+            local_srt.unlink()
+        local_srt_tmp.rename(local_srt)
+
+        # Also rename the .txt.tmp if it was created
+        local_txt_tmp = voice_dir / f"{name}.txt.tmp"
+        if local_txt_tmp.exists():
+            if local_txt.exists():
+                local_txt.unlink()
+            local_txt_tmp.rename(local_txt)
+
+        safe_print(f"[SRT] {name}: SRT created in voice folder")
+
+        # Now copy to PROJECTS atomically (VM only sees when complete)
+        if copy_to_projects_atomic(name, voice_path, local_srt, local_txt):
+            safe_print(f"[SRT] {name}: Done!")
+            return True
+        return False
+
     except Exception as e:
         safe_print(f"[SRT] {name}: Error - {e}")
+        # Cleanup tmp file if failed
+        if local_srt_tmp.exists():
+            try:
+                local_srt_tmp.unlink()
+            except:
+                pass
         return False
 
 
@@ -300,15 +463,23 @@ def scan_voice_folder(voice_dir: Path) -> list:
 
 
 def get_pending_srt(voice_dir: Path) -> list:
-    """Get voice files that need SRT."""
+    """Get voice files that need SRT or need copying to PROJECTS."""
     pending = []
 
     voice_files = scan_voice_folder(voice_dir)
     for voice_path in voice_files:
         name = voice_path.stem
+        voice_folder = voice_path.parent
+
+        # Check if SRT exists in PROJECTS
         project_dir = PROJECTS_DIR / name
-        srt_path = project_dir / f"{name}.srt"
-        if not srt_path.exists():
+        project_srt = project_dir / f"{name}.srt"
+
+        # Check if local SRT exists (in voice folder)
+        local_srt = voice_folder / f"{name}.srt"
+
+        # Need processing if: no project SRT (either need Whisper or need copy)
+        if not project_srt.exists():
             pending.append(voice_path)
 
     if PROJECTS_DIR.exists():

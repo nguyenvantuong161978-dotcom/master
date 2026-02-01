@@ -1,0 +1,38 @@
+{
+  "chrome_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+  "claude_url": "https://claude.ai/new", 
+
+  "SHEET_NAME": "INPUT",
+  "SPREADSHEET_NAME": "KA",
+  "PROMPT_SHEET": "PROMPT",
+  "CREDENTIAL_PATH": "creds.json",
+  "TTS_CREDENTIAL_PATH": "key.json",
+  "OPENAI_API_KEY": "",
+
+  "sheet_name": "KA",
+  "worksheet_name": "CLAUDE",
+  "profiles": [
+    {
+      "name": "Profile 1",
+      "dir": "Profile 1"
+    }
+  ],
+  "chatbox_images": [
+    "star.png",
+    "star2.png"
+  ],
+  "ok_images": [
+    "ok.png"
+  ],
+  "done_images": [
+    "done.png",
+    "done1.png"
+  ],
+  "scroll_position": [
+    250,
+    300
+  ],
+  "prompt_limit": 99,
+  "session_limit_minutes": 120,
+  "profile_log_path": "logs/profile_usage.log"
+}
