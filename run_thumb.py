@@ -92,14 +92,12 @@ def get_sheets_data(config):
         log("gspread not installed. Run: pip install gspread google-auth", "ERROR")
         return {}
 
-    cred_path = config.get("CREDENTIAL_PATH", "creds.json")
-    if not Path(cred_path).exists():
-        cred_path = TOOL_DIR / "config" / Path(cred_path).name
-    if not Path(cred_path).exists():
-        cred_path = THUMB_DIR / Path(cred_path).name
+    # Always use config folder for credentials (single location for easier management)
+    cred_path = TOOL_DIR / "config" / config.get("CREDENTIAL_PATH", "creds.json")
 
-    if not Path(cred_path).exists():
+    if not cred_path.exists():
         log(f"Credentials not found: {cred_path}", "ERROR")
+        log("Please place creds.json in config/ folder", "ERROR")
         return {}
 
     try:

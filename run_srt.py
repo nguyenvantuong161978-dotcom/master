@@ -26,6 +26,7 @@ from datetime import timedelta
 TOOL_DIR = Path(__file__).parent
 DEFAULT_VOICE_DIR = Path("D:/AUTO/voice")
 PROJECTS_DIR = TOOL_DIR / "PROJECTS"
+DONE_DIR = Path("D:/AUTO/done")  # Check this to skip already completed codes
 SCAN_INTERVAL = 30
 
 _print_lock = threading.Lock()
@@ -343,7 +344,6 @@ def process_voice_to_srt(voice_path: Path) -> bool:
     1. Create SRT in voice folder (as .srt.tmp while processing)
     2. When Whisper completes, rename .tmp to .srt
     3. Copy voice + SRT to PROJECTS atomically (using temp folder)
-    4. Delete source voice files
 
     This ensures:
     - SRT only appears when fully complete
@@ -352,6 +352,11 @@ def process_voice_to_srt(voice_path: Path) -> bool:
     name = voice_path.stem
     voice_dir = voice_path.parent
     is_from_source = PROJECTS_DIR not in voice_path.parents
+
+    # Skip if already done (video exists in DONE folder)
+    if is_code_done(name):
+        safe_print(f"[SRT] {name}: Already done (video in DONE folder), skipping...")
+        return True
 
     # Paths in voice folder (where we create SRT first)
     local_srt_tmp = voice_dir / f"{name}.srt.tmp"
@@ -462,6 +467,15 @@ def scan_voice_folder(voice_dir: Path) -> list:
     return sorted(voice_files)
 
 
+def is_code_done(code: str) -> bool:
+    """Check if code already has video in DONE folder."""
+    done_dir = DONE_DIR / code
+    if done_dir.exists():
+        mp4_files = list(done_dir.glob("*.mp4"))
+        return len(mp4_files) > 0
+    return False
+
+
 def get_pending_srt(voice_dir: Path) -> list:
     """Get voice files that need SRT or need copying to PROJECTS."""
     pending = []
@@ -470,6 +484,10 @@ def get_pending_srt(voice_dir: Path) -> list:
     for voice_path in voice_files:
         name = voice_path.stem
         voice_folder = voice_path.parent
+
+        # Skip if already done (video exists in DONE folder)
+        if is_code_done(name):
+            continue
 
         # Check if SRT exists in PROJECTS
         project_dir = PROJECTS_DIR / name
@@ -487,6 +505,9 @@ def get_pending_srt(voice_dir: Path) -> list:
             if not project_dir.is_dir():
                 continue
             name = project_dir.name
+            # Skip if already done
+            if is_code_done(name):
+                continue
             srt_path = project_dir / f"{name}.srt"
             if srt_path.exists():
                 continue
