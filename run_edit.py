@@ -58,8 +58,8 @@ SOURCE_COL_CODE = 7
 SOURCE_COL_STATUS = 13
 STATUS_VALUE = "EDIT XONG"
 
-MAX_RETRIES = 5
-RETRY_BASE_DELAY = 2
+MAX_RETRIES = 7  # Increased for Google Sheets reliability
+RETRY_BASE_DELAY = 3  # Start with 3s delay
 
 # Hide console window for subprocess on Windows
 if sys.platform == "win32":
@@ -1961,11 +1961,34 @@ def process_project(project_info: Dict, callback=None) -> bool:
 
     delete_visual_project(project_info, callback)
 
-    found, updated = update_sheet_status([code], callback)
-    if updated > 0:
-        plog(f"Sheet updated: {STATUS_VALUE}")
+    # Update sheet status with aggressive retry (MUST succeed before cleanup)
+    sheet_updated = False
+    max_sheet_retries = 10
+    for sheet_attempt in range(max_sheet_retries):
+        found, updated = update_sheet_status([code], callback)
+        if updated > 0:
+            plog(f"Sheet updated: {STATUS_VALUE}")
+            sheet_updated = True
+            break
+        elif found > 0:
+            # Found but already had correct status
+            plog(f"Sheet already has correct status")
+            sheet_updated = True
+            break
+        else:
+            # Not found or error - retry
+            if sheet_attempt < max_sheet_retries - 1:
+                delay = min(30, 5 * (sheet_attempt + 1))  # 5s, 10s, 15s... max 30s
+                plog(f"Sheet update failed, retrying in {delay}s... (attempt {sheet_attempt + 1}/{max_sheet_retries})", "WARN")
+                time.sleep(delay)
 
-    # Clean up source data (voice folder + PROJECTS folder) after everything is done
+    if not sheet_updated:
+        plog(f"CRITICAL: Sheet update failed after {max_sheet_retries} attempts! NOT cleaning up source data.", "ERROR")
+        plog(f"Please manually update sheet for code: {code}", "ERROR")
+        # Still return True because video is done, but don't cleanup
+        return True
+
+    # Clean up source data (voice folder + PROJECTS folder) ONLY after sheet is updated
     cleanup_source_data(code, callback)
 
     plog(f"DONE: {code}")
