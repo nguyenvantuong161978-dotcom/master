@@ -509,6 +509,69 @@ def fill_missing_media(project_dir: Path, excel_path: Path) -> Tuple[int, int]:
 # PROJECT DETECTION
 # ============================================================================
 
+# Folder stability settings
+FOLDER_STABLE_CHECK_INTERVAL = 5  # Check every 5 seconds
+FOLDER_STABLE_DURATION = 20  # Folder must be stable for 20 seconds
+
+
+def is_folder_stable(folder_path: Path, check_interval: int = FOLDER_STABLE_CHECK_INTERVAL,
+                     stable_duration: int = FOLDER_STABLE_DURATION) -> bool:
+    """Check if all files in folder are stable (not being copied/written).
+
+    Returns True if no file sizes have changed for stable_duration seconds.
+    This prevents processing a project while VM is still copying files.
+    """
+    if not folder_path.exists():
+        return False
+
+    def get_folder_snapshot():
+        """Get dict of {file_path: size} for all files in folder."""
+        snapshot = {}
+        try:
+            for item in folder_path.rglob("*"):
+                if item.is_file():
+                    try:
+                        snapshot[str(item)] = item.stat().st_size
+                    except:
+                        pass
+        except:
+            pass
+        return snapshot
+
+    checks_needed = stable_duration // check_interval
+    last_snapshot = get_folder_snapshot()
+
+    if not last_snapshot:
+        return False  # Empty folder
+
+    for i in range(checks_needed):
+        time.sleep(check_interval)
+
+        current_snapshot = get_folder_snapshot()
+
+        # Check if any file changed size or new files appeared
+        changed = False
+        for path, size in current_snapshot.items():
+            if path not in last_snapshot:
+                # New file appeared
+                log(f"    [WAIT] New file detected: {Path(path).name}")
+                changed = True
+                break
+            if last_snapshot[path] != size:
+                # File size changed
+                log(f"    [WAIT] File still copying: {Path(path).name} ({last_snapshot[path]} -> {size})")
+                changed = True
+                break
+
+        if changed:
+            # Reset and start fresh monitoring
+            return is_folder_stable(folder_path, check_interval, stable_duration)
+
+        last_snapshot = current_snapshot
+
+    return True
+
+
 def get_project_info(project_dir: Path) -> Dict:
     """Get project info from directory."""
     code = project_dir.name
@@ -1933,6 +1996,7 @@ def generate_thumbnail_for_project(project_info: Dict, callback=None) -> bool:
 
 def process_project(project_info: Dict, callback=None) -> bool:
     code = project_info["code"]
+    project_dir = project_info["path"]
 
     def plog(msg, level="INFO"):
         if callback:
@@ -1943,6 +2007,13 @@ def process_project(project_info: Dict, callback=None) -> bool:
     plog("="*50)
     plog(f"Processing: {code}")
     plog("="*50)
+
+    # Check if folder is stable (VM finished copying)
+    plog("Checking if folder is stable (VM copy complete)...")
+    if not is_folder_stable(project_dir):
+        plog("Folder is still being copied, skipping for now...", "WARN")
+        return False
+
     plog(f"Media: {project_info['video_count']} videos + {project_info['image_count']} images")
     plog(f"Scenes: {project_info['total_scenes']}")
 
