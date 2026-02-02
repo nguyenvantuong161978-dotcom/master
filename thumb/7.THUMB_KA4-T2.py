@@ -364,7 +364,7 @@ def generate(row):
 
 def load_df():
     creds = Credentials.from_service_account_file(
-        config["CREDENTIAL_PATH"],
+        str(BASE_DIR.parent / "config" / config.get("CREDENTIAL_PATH", "creds.json")),
         scopes=["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/spreadsheets.readonly"]
     )
     gc = gspread.authorize(creds)

@@ -43,6 +43,8 @@ TOOL_DIR = Path(__file__).parent
 VISUAL_DIR = Path(r"D:\AUTO\VISUAL")
 DONE_DIR = Path(r"D:\AUTO\done")
 THUMB_DIR = Path(r"D:\AUTO\thumbnails")
+VOICE_DIR = Path(r"D:\AUTO\voice")  # Voice source folder
+PROJECTS_DIR = TOOL_DIR / "PROJECTS"  # SRT projects folder
 CONFIG_FILE = TOOL_DIR / "config" / "config.json"
 PROGRESS_FILE = TOOL_DIR / "progress.json"
 
@@ -772,6 +774,28 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
     plog(f"  Voice: {voice_path.name}")
     plog(f"  SRT: {srt_path.name if srt_path else 'None'}")
     plog(f"  Excel: {excel_path.name}")
+
+    # Check if Excel file is stable (not being written/downloaded)
+    def is_file_stable(file_path, check_interval=5, stable_duration=15):
+        """Check if file size is stable for a period of time."""
+        if not file_path.exists():
+            return False
+        last_size = file_path.stat().st_size
+        checks = stable_duration // check_interval
+        for i in range(checks):
+            time.sleep(check_interval)
+            if not file_path.exists():
+                return False
+            current_size = file_path.stat().st_size
+            if current_size != last_size:
+                plog(f"  Excel still changing: {last_size} -> {current_size}, waiting...")
+                last_size = current_size
+                return is_file_stable(file_path, check_interval, stable_duration)
+        return True
+
+    # Wait for Excel to be stable before opening
+    if not is_file_stable(excel_path):
+        return False, None, "Excel file is still being written"
 
     try:
         import openpyxl
@@ -1651,6 +1675,61 @@ def delete_visual_project(project_info: Dict, callback=None) -> bool:
         return False
 
 
+def cleanup_source_data(code: str, callback=None) -> bool:
+    """Clean up source data after video is complete.
+
+    Deletes:
+    - Voice files from D:/AUTO/voice/{code}.*
+    - PROJECTS/{code}/ folder
+    """
+    def plog(msg, level="INFO"):
+        if callback:
+            callback(msg, level)
+        else:
+            log(f"[{code}] {msg}", level)
+
+    deleted_count = 0
+
+    # Delete from PROJECTS folder
+    projects_dir = PROJECTS_DIR / code
+    if projects_dir.exists():
+        try:
+            shutil.rmtree(projects_dir)
+            plog(f"Deleted PROJECTS folder: {code}")
+            deleted_count += 1
+        except Exception as e:
+            plog(f"Cannot delete PROJECTS folder: {e}", "WARN")
+
+    # Delete from voice folder (files matching {code}.*)
+    if VOICE_DIR.exists():
+        for item in VOICE_DIR.iterdir():
+            if item.name.startswith(code + ".") or item.name == code:
+                try:
+                    if item.is_dir():
+                        shutil.rmtree(item)
+                    else:
+                        item.unlink()
+                    plog(f"Deleted voice file: {item.name}")
+                    deleted_count += 1
+                except Exception as e:
+                    plog(f"Cannot delete voice file {item.name}: {e}", "WARN")
+
+        # Also check subfolders in voice (for voice/{code}/ structure)
+        voice_subdir = VOICE_DIR / code
+        if voice_subdir.exists() and voice_subdir.is_dir():
+            try:
+                shutil.rmtree(voice_subdir)
+                plog(f"Deleted voice subfolder: {code}")
+                deleted_count += 1
+            except Exception as e:
+                plog(f"Cannot delete voice subfolder: {e}", "WARN")
+
+    if deleted_count > 0:
+        plog(f"Cleanup complete: {deleted_count} items deleted")
+
+    return deleted_count > 0
+
+
 # ============================================================================
 # GOOGLE SHEET UPDATE
 # ============================================================================
@@ -1885,6 +1964,9 @@ def process_project(project_info: Dict, callback=None) -> bool:
     found, updated = update_sheet_status([code], callback)
     if updated > 0:
         plog(f"Sheet updated: {STATUS_VALUE}")
+
+    # Clean up source data (voice folder + PROJECTS folder) after everything is done
+    cleanup_source_data(code, callback)
 
     plog(f"DONE: {code}")
     return True

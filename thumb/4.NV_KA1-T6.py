@@ -43,7 +43,7 @@ CONFIG_FILE  = sys.argv[1] if len(sys.argv) > 1 else str(BASE_DIR.parent / "conf
 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
     config = json.load(f)
 
-CREDENTIAL_PATH  = config["CREDENTIAL_PATH"]
+CREDENTIAL_PATH  = str(BASE_DIR.parent / "config" / config.get("CREDENTIAL_PATH", "creds.json"))
 SPREADSHEET_NAME = config["SPREADSHEET_NAME"]
 SHEET_NAME       = config["SHEET_NAME"]
 
