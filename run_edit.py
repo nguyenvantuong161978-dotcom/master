@@ -50,7 +50,7 @@ PROGRESS_FILE = TOOL_DIR / "progress.json"
 
 SCAN_INTERVAL = 30  # Scan every 30 seconds for new projects
 DEFAULT_PARALLEL = 4
-CLIP_WORKERS = 3  # Number of parallel workers for clip creation (3 workers ~ 90% CPU)
+CLIP_WORKERS = 4  # Number of parallel workers for clip creation (optimized for 64GB RAM)
 
 # Google Sheet config
 SOURCE_SHEET_NAME = "NGUON"
