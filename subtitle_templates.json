@@ -15,7 +15,7 @@
     "outline_size": 2,
     "margin_v": 25,
     "alignment": 2,
-    "compose_mode": "quality"
+    "compose_mode": "balanced"
   },
   "KA5-T2": {
     "output_resolution": "4k",
@@ -33,6 +33,6 @@
     "outline_size": 2,
     "margin_v": 25,
     "alignment": 2,
-    "compose_mode": "quality"
+    "compose_mode": "balanced"
   }
 }
