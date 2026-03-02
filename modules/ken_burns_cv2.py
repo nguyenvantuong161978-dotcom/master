@@ -41,6 +41,10 @@ QUALITY_PRESETS = {
 TARGET_RATIO = 16 / 9
 DEFAULT_FPS = 30
 
+# Multi-segment: clips longer than this get multiple camera movements
+MULTI_SEGMENT_THRESHOLD = 12  # seconds
+SEGMENT_TARGET_DURATION = 8   # seconds per segment
+
 
 # ============================================================================
 # KEN BURNS GENERATOR CLASS
@@ -204,13 +208,15 @@ class KenBurnsCv2:
             offset = (h - new_h) // 2
             return image[offset:offset + new_h, :]
 
-    def prepare_image(self, image: np.ndarray, output_size: Tuple[int, int]) -> np.ndarray:
+    def prepare_image(self, image: np.ndarray, output_size: Tuple[int, int],
+                      multi_segment: bool = False) -> np.ndarray:
         """
         Prepare image for Ken Burns effect:
         1. Crop to 16:9
         2. Scale up if needed (for zoom/pan headroom)
 
-        Uses configured zoom/pan amounts to determine minimum scale needed
+        Args:
+            multi_segment: If True, use more headroom for multi-segment camera path
         """
         # Crop to 16:9
         img = self.crop_to_aspect_ratio(image)
@@ -218,10 +224,11 @@ class KenBurnsCv2:
         h, w = img.shape[:2]
         out_w, out_h = output_size
 
-        # Calculate minimum scale needed based on intensity settings
-        # Only need enough headroom for the configured zoom/pan amount
-        # Add small buffer (1.02x) for safety
-        headroom = 1.0 + self.zoom_amount + 0.02
+        if multi_segment:
+            # More headroom for wider camera movement
+            headroom = 1.0 + self.zoom_amount * 2 + self.pan_amount * 0.5 + 0.05
+        else:
+            headroom = 1.0 + self.zoom_amount + 0.02
 
         min_scale = max(
             (out_w * headroom) / w,
@@ -348,29 +355,53 @@ class KenBurnsCv2:
         total_frames = int(duration * self.fps)
         fade_frames = int(self.fade_duration * self.fps) if apply_fade else 0
 
-        # Prepare image
-        img = self.prepare_image(image, output_size)
+        if duration > MULTI_SEGMENT_THRESHOLD:
+            # --- Multi-segment branch: chain camera movements ---
+            img = self.prepare_image(image, output_size, multi_segment=True)
+            keyframes, n_segments = self._generate_camera_path(duration)
+            frames_per_segment = total_frames / n_segments
 
-        # Get effect parameters
-        zoom_amount, pan_amount, base_scale = self.get_effect_params(duration)
+            for frame_num in range(total_frames):
+                # Which segment are we in?
+                seg_idx = min(int(frame_num / frames_per_segment), n_segments - 1)
+                local_t = (frame_num - seg_idx * frames_per_segment) / frames_per_segment
+                local_t = max(0.0, min(1.0, local_t))
 
-        for frame_num in range(total_frames):
-            # Progress: 0 -> 1
-            t = frame_num / (total_frames - 1) if total_frames > 1 else 0
+                # Smooth easing
+                eased_t = self._ease_in_out(local_t)
 
-            # Calculate transform based on effect
-            scale, offset_x, offset_y = self._calculate_transform(
-                effect, t, zoom_amount, pan_amount, base_scale
-            )
+                # Interpolate between adjacent keyframes
+                s0, ox0, oy0 = keyframes[seg_idx]
+                s1, ox1, oy1 = keyframes[seg_idx + 1]
 
-            # Apply transform
-            frame = self.apply_transform(img, scale, offset_x, offset_y, output_size)
+                scale = s0 + (s1 - s0) * eased_t
+                offset_x = ox0 + (ox1 - ox0) * eased_t
+                offset_y = oy0 + (oy1 - oy0) * eased_t
 
-            # Apply fade
-            if apply_fade:
-                frame = self.apply_fade(frame, frame_num, total_frames, fade_frames)
+                frame = self.apply_transform(img, scale, offset_x, offset_y, output_size)
 
-            yield frame
+                if apply_fade:
+                    frame = self.apply_fade(frame, frame_num, total_frames, fade_frames)
+
+                yield frame
+        else:
+            # --- Single-effect branch: original behavior ---
+            img = self.prepare_image(image, output_size)
+            zoom_amount, pan_amount, base_scale = self.get_effect_params(duration)
+
+            for frame_num in range(total_frames):
+                t = frame_num / (total_frames - 1) if total_frames > 1 else 0
+
+                scale, offset_x, offset_y = self._calculate_transform(
+                    effect, t, zoom_amount, pan_amount, base_scale
+                )
+
+                frame = self.apply_transform(img, scale, offset_x, offset_y, output_size)
+
+                if apply_fade:
+                    frame = self.apply_fade(frame, frame_num, total_frames, fade_frames)
+
+                yield frame
 
     def _calculate_transform(
         self,
@@ -443,6 +474,53 @@ class KenBurnsCv2:
             offset_y = 0.5
 
         return scale, offset_x, offset_y
+
+    def _ease_in_out(self, t: float) -> float:
+        """Cubic ease-in-out for smooth segment transitions."""
+        if t < 0.5:
+            return 4 * t * t * t
+        else:
+            return 1 - pow(-2 * t + 2, 3) / 2
+
+    def _generate_camera_path(self, duration: float) -> Tuple[List[Tuple[float, float, float]], int]:
+        """
+        Generate keyframes for multi-segment Ken Burns on long clips.
+
+        Returns:
+            (keyframes, n_segments) where keyframes is a list of (scale, offset_x, offset_y)
+        """
+        n_segments = max(2, round(duration / SEGMENT_TARGET_DURATION))
+
+        zoom_amount, pan_amount, _ = self.get_effect_params(SEGMENT_TARGET_DURATION)
+
+        # Wider ranges for visible movement per segment
+        scale_min = 1.0
+        scale_max = 1.0 + zoom_amount * 1.5
+        ox_min = 0.5 - pan_amount
+        ox_max = 0.5 + pan_amount
+        oy_min = 0.5 - pan_amount * 0.6
+        oy_max = 0.5 + pan_amount * 0.6
+
+        keyframes = []
+        for i in range(n_segments + 1):
+            for _attempt in range(20):
+                scale = random.uniform(scale_min, scale_max)
+                ox = random.uniform(ox_min, ox_max)
+                oy = random.uniform(oy_min, oy_max)
+
+                # Ensure sufficient distance from previous keyframe
+                if i > 0:
+                    prev_s, prev_ox, prev_oy = keyframes[-1]
+                    dist = abs(scale - prev_s) / max(0.01, scale_max - scale_min) \
+                         + abs(ox - prev_ox) / max(0.01, ox_max - ox_min) \
+                         + abs(oy - prev_oy) / max(0.01, oy_max - oy_min)
+                    if dist < 0.6:
+                        continue  # Too close, retry
+                break
+
+            keyframes.append((scale, ox, oy))
+
+        return keyframes, n_segments
 
     def create_clip_from_image(
         self,

@@ -1,4 +1,6 @@
 # thumbnail_generator.py – QUY HOẠCH FULL
+from PIL import ImageFilter
+import numpy as np
 import io, os
 
 import json
@@ -115,6 +117,71 @@ def save_under_2mb_jpeg(im: Image.Image, out_path: Path, max_bytes: int = 2_000_
 
 
 
+
+# ========= MATTE HELPERS =========
+try:
+    import torch
+    from torchvision import transforms
+    TORCH_OK = True
+except:
+    TORCH_OK = False
+try:
+    import cv2
+    CV2_OK = True
+except:
+    CV2_OK = False
+try:
+    from rembg import remove as rembg_remove
+    REMBG_OK = True
+except:
+    REMBG_OK = False
+
+_MODNET = {"model": None, "device": None}
+
+def _load_modnet(weight_path: Path = Path("MODNet/modnet_photographic_portrait_matting.pth")) -> bool:
+    if not TORCH_OK: return False
+    if _MODNET["model"]: return True
+    try:
+        import sys
+        modnet_src = Path("MODNet") / "src"
+        if modnet_src.exists(): sys.path.append(str(modnet_src))
+        from models.modnet import MODNet
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = MODNet(backbone_pretrained=False)
+        sd = torch.load(str(weight_path), map_location=device)
+        sd = {k.replace("module.", ""): v for k, v in sd.items()}
+        model.load_state_dict(sd)
+        model.to(device).eval()
+        _MODNET.update({"model": model, "device": device})
+        return True
+    except: return False
+
+def _preprocess_512(img):
+    tfm = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
+    return tfm(img.convert("RGB").resize((512, 512))).unsqueeze(0)
+
+def smart_cutout(pil_image, modnet_weight=Path("MODNet/modnet_photographic_portrait_matting.pth"), upscale=6, alpha_blur=3):
+    im = pil_image
+    if im.mode in ("RGBA", "LA") and max(im.split()[-1].getextrema()) <= 250:
+        return im.convert("RGBA")
+    if _load_modnet(modnet_weight) and CV2_OK:
+        with torch.no_grad():
+            model, device = _MODNET["model"], _MODNET["device"]
+            w, h = im.size
+            big = im.convert("RGB").resize((w*upscale, h*upscale), Image.LANCZOS)
+            tin = _preprocess_512(big).to(device)
+            _, _, matte = model(tin, True)
+            matte_np = matte[0][0].detach().cpu().numpy()
+            matte_np = cv2.resize(matte_np, big.size, interpolation=cv2.INTER_AREA)
+            alpha = (np.clip(matte_np, 0, 1) * 255).astype(np.uint8)
+            rgba = Image.fromarray(np.dstack((np.array(big), alpha)), "RGBA")
+            a = rgba.split()[-1].filter(ImageFilter.GaussianBlur(alpha_blur))
+            rgba = Image.merge("RGBA", (*rgba.split()[:3], a))
+            return rgba.resize((w, h), Image.LANCZOS)
+    if REMBG_OK:
+        out = rembg_remove(im.convert("RGB"))
+        return (out if isinstance(out, Image.Image) else Image.open(out)).convert("RGBA")
+    return im.convert("RGBA")
 
 def clean_text(text):
     if not isinstance(text, str):
@@ -278,17 +345,33 @@ def generate(row):
         print(f"⚠️ {row.image_code}: Không tìm thấy ảnh nền trong 'pic/' – skip")
         return
 
-    # --- Canvas & ảnh bên phải ---
-    canvas = Image.new("RGB", (img_w, img_h), "white")
-    src = Image.open(bg_path).convert("RGB")
-    # Scale to fill height (1080px)
-    scale = img_h / src.height
-    new_w = int(src.width * scale)
-    src_resized = src.resize((new_w, img_h), Image.LANCZOS)
-    # Crop from RIGHT side (person is on right side of source image)
-    left_crop = max(0, src_resized.width - right_w)
-    right = src_resized.crop((left_crop, 0, src_resized.width, img_h))
-    canvas.paste(right, (panel_w, 0))
+    # --- Canvas & ảnh bên phải (giống KA2) ---
+    canvas = Image.new("RGBA", (img_w, img_h), (255, 255, 255, 255))
+    src = Image.open(bg_path)
+    cut = smart_cutout(src)
+    if cut.mode == "RGBA":
+        alpha = cut.split()[-1]
+        bbox = alpha.getbbox()
+        if bbox: cut = cut.crop(bbox)
+    # Scale theo chiều cao để nhân vật to như KA2
+    orig_w, orig_h = cut.size
+    scale = img_h / orig_h
+    new_w = int(orig_w * scale)
+    new_h = img_h
+    cut = cut.resize((new_w, new_h), Image.LANCZOS)
+    orig_w, orig_h = cut.size
+
+    # Center ngang trong panel phải
+    px = panel_w + (right_w - orig_w) // 2
+    py = 0  # Top-aligned vì đã scale full height
+
+    # Nếu nhân vật rộng hơn panel, crop center để vừa
+    if orig_w > right_w:
+        crop_left = (orig_w - right_w) // 2
+        cut = cut.crop((crop_left, 0, crop_left + right_w, orig_h))
+        px = panel_w
+
+    canvas.paste(cut, (px, py), cut)
 
     draw = ImageDraw.Draw(canvas)
 

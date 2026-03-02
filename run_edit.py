@@ -22,10 +22,18 @@ import argparse
 import random
 import tempfile
 import gc
+import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from enum import Enum
+
+# For hardware detection
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
 
 # Import Ken Burns CV2 module
 try:
@@ -49,8 +57,131 @@ CONFIG_FILE = TOOL_DIR / "config" / "config.json"
 PROGRESS_FILE = TOOL_DIR / "progress.json"
 
 SCAN_INTERVAL = 30  # Scan every 30 seconds for new projects
-DEFAULT_PARALLEL = 4
-CLIP_WORKERS = 4  # Number of parallel workers for clip creation (optimized for 64GB RAM)
+DEFAULT_PARALLEL = 4  # Will be auto-adjusted based on hardware
+
+# Track currently processing codes to prevent duplicate processing
+_processing_codes = set()
+_processing_lock = threading.Lock()
+
+# ============================================================================
+# HARDWARE DETECTION & RESOURCE OPTIMIZATION
+# ============================================================================
+
+def detect_system_resources():
+    """Detect system hardware resources for optimization."""
+    resources = {
+        "cpu_cores": os.cpu_count() or 4,
+        "cpu_physical": os.cpu_count() or 4,
+        "ram_gb": 8,  # Default
+        "gpu_available": False,
+        "gpu_encoder": "libx264",
+        "cpu_percent": 0,
+    }
+
+    # Get physical CPU cores (not hyperthreading)
+    if PSUTIL_AVAILABLE:
+        try:
+            resources["cpu_physical"] = psutil.cpu_count(logical=False) or resources["cpu_cores"]
+            resources["ram_gb"] = psutil.virtual_memory().total / (1024**3)
+            resources["cpu_percent"] = psutil.cpu_percent(interval=0.1)
+        except:
+            pass
+
+    # Detect GPU encoder
+    try:
+        gpu_check = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=5,
+            creationflags=SUBPROCESS_FLAGS if sys.platform == "win32" else 0
+        )
+        if "h264_nvenc" in gpu_check.stdout:
+            resources["gpu_available"] = True
+            resources["gpu_encoder"] = "h264_nvenc"
+    except:
+        pass
+
+    return resources
+
+
+def get_optimal_workers(resources: dict = None, task_type: str = "clip") -> int:
+    """
+    Calculate optimal number of parallel workers based on system resources.
+
+    Args:
+        resources: System resources dict from detect_system_resources()
+        task_type: "clip" for clip creation, "encode" for encoding, "parallel" for parallel projects
+
+    Returns:
+        Optimal number of workers
+    """
+    if resources is None:
+        resources = detect_system_resources()
+
+    cpu_physical = resources.get("cpu_physical", 4)
+    ram_gb = resources.get("ram_gb", 8)
+    gpu_available = resources.get("gpu_available", False)
+
+    if task_type == "parallel":
+        # For parallel video projects:
+        # Goal: Maximum throughput (100% CPU is OK)
+
+        # RAM-based: Each project needs ~4GB
+        ram_parallel = max(1, int((ram_gb - 8) / 4))
+
+        # CPU-based: Use half of physical cores per project
+        cpu_parallel = max(1, cpu_physical // 2)
+
+        # GPU bonus: NVENC allows more parallel work
+        if gpu_available:
+            gpu_bonus = 2  # Full bonus for speed
+        else:
+            gpu_bonus = 0
+
+        optimal = min(ram_parallel, cpu_parallel) + gpu_bonus
+
+        # Run 2 videos in parallel (safe for GTX 1660 SUPER 6GB VRAM)
+        return 2
+
+    elif task_type == "clip":
+        # For OpenCV Ken Burns (CPU intensive):
+        # Target ~90% CPU usage
+
+        # RAM-based limit: Each 4K clip needs ~2GB
+        ram_workers = max(1, int((ram_gb - 8) / 2))
+
+        # CPU-based limit: Use all physical cores for max throughput
+        cpu_workers = cpu_physical
+
+        # Take minimum of constraints
+        optimal = min(ram_workers, cpu_workers)
+
+        # Cap at 8 workers per video (use all physical cores)
+        return max(1, min(optimal, 8))
+
+    elif task_type == "encode":
+        # For FFmpeg encoding:
+        # GPU can handle multiple streams
+        if gpu_available:
+            return min(4, cpu_physical)  # GPU can handle more parallelism
+        else:
+            return max(1, cpu_physical // 2)  # CPU encoding is heavy
+
+    return 4  # Default
+
+
+# Auto-detect resources at startup
+_system_resources = None
+
+def get_system_resources():
+    """Get cached system resources (detect once)."""
+    global _system_resources
+    if _system_resources is None:
+        _system_resources = detect_system_resources()
+    return _system_resources
+
+
+# Dynamic CLIP_WORKERS based on system resources
+CLIP_WORKERS = get_optimal_workers(task_type="clip")  # Will be set based on hardware
 
 # Google Sheet config
 SOURCE_SHEET_NAME = "NGUON"
@@ -68,40 +199,139 @@ else:
     SUBPROCESS_FLAGS = 0
 
 
-# Progress tracking for GUI
-_current_progress = {
-    "code": "",
-    "step": "",
-    "percent": 0,
-    "clip_current": 0,
-    "clip_total": 0,
-    "status": "idle"
+# Progress tracking for GUI - supports multiple videos in parallel
+_multi_progress = {
+    "videos": {},      # Dict of code -> video progress
+    "hardware": None,  # Hardware info (set at startup)
+    "updated": None,
 }
+_progress_lock = threading.Lock()
 
 
 def update_progress(code: str = None, step: str = None, percent: int = None,
-                   clip_current: int = None, clip_total: int = None, status: str = None):
-    """Update progress and write to file for GUI to read."""
-    if code is not None:
-        _current_progress["code"] = code
-    if step is not None:
-        _current_progress["step"] = step
-    if percent is not None:
-        _current_progress["percent"] = percent
-    if clip_current is not None:
-        _current_progress["clip_current"] = clip_current
-    if clip_total is not None:
-        _current_progress["clip_total"] = clip_total
-    if status is not None:
-        _current_progress["status"] = status
+                   clip_current: int = None, clip_total: int = None, status: str = None,
+                   remove: bool = False):
+    """Update progress for a specific video and write to file for GUI to read.
 
-    _current_progress["updated"] = time.strftime("%H:%M:%S")
+    Args:
+        code: Video code (required for multi-video tracking)
+        step: Current processing step
+        percent: Progress percentage (0-100)
+        clip_current: Current clip number
+        clip_total: Total clips
+        status: Status string
+        remove: If True, remove this video from tracking (when done)
+    """
+    from datetime import datetime
 
+    now = datetime.now()
+
+    with _progress_lock:
+        # Handle remove request
+        if remove and code and code in _multi_progress["videos"]:
+            del _multi_progress["videos"][code]
+            _write_progress()
+            return
+
+        # If no code provided and videos exist, do nothing (avoid overwrite)
+        if not code:
+            # Legacy support: if no videos, show idle state
+            if not _multi_progress["videos"]:
+                _multi_progress["updated"] = time.strftime("%H:%M:%S")
+                _write_progress()
+            return
+
+        # Get or create video progress entry
+        if code not in _multi_progress["videos"]:
+            _multi_progress["videos"][code] = {
+                "code": code,
+                "step": "",
+                "percent": 0,
+                "clip_current": 0,
+                "clip_total": 0,
+                "status": "starting",
+                "started_at": now.isoformat(),
+                "step_started_at": now.isoformat(),
+                "elapsed_seconds": 0,
+                "eta_seconds": None,
+            }
+
+        video_progress = _multi_progress["videos"][code]
+
+        # Update step (track timing when step changes)
+        if step is not None and step != video_progress.get("step"):
+            video_progress["step"] = step
+            video_progress["step_started_at"] = now.isoformat()
+
+        # Update other fields
+        if percent is not None:
+            video_progress["percent"] = percent
+        if clip_current is not None:
+            video_progress["clip_current"] = clip_current
+        if clip_total is not None:
+            video_progress["clip_total"] = clip_total
+        if status is not None:
+            video_progress["status"] = status
+
+        # Calculate elapsed time and ETA
+        if video_progress.get("started_at"):
+            try:
+                started = datetime.fromisoformat(video_progress["started_at"])
+                elapsed = (now - started).total_seconds()
+                video_progress["elapsed_seconds"] = int(elapsed)
+
+                # Calculate ETA based on progress
+                clip_cur = video_progress.get("clip_current", 0)
+                clip_tot = video_progress.get("clip_total", 0)
+                step_name = video_progress.get("step", "").lower()
+
+                # ETA for clip creation phase
+                if "clip" in step_name and clip_tot > 0:
+                    step_started = video_progress.get("step_started_at")
+                    if step_started and clip_cur > 0:
+                        step_start_time = datetime.fromisoformat(step_started)
+                        step_elapsed = (now - step_start_time).total_seconds()
+                        per_clip = step_elapsed / clip_cur
+                        remaining_clips = clip_tot - clip_cur
+                        clips_eta = per_clip * remaining_clips
+                        video_progress["eta_seconds"] = int(clips_eta * 1.2)
+                    elif clip_tot > 0:
+                        video_progress["eta_seconds"] = int(clip_tot * 3)
+
+                # General ETA based on percent
+                current_percent = video_progress.get("percent", 0)
+                if current_percent > 5 and "clip" not in step_name:
+                    total_estimated = elapsed / (current_percent / 100)
+                    remaining = total_estimated - elapsed
+                    video_progress["eta_seconds"] = max(0, int(remaining))
+            except:
+                pass
+
+        _multi_progress["updated"] = time.strftime("%H:%M:%S")
+        _write_progress()
+
+
+def _write_progress():
+    """Write progress to file (must be called with lock held)."""
     try:
+        # Build output structure
+        output = {
+            "videos": _multi_progress["videos"],
+            "hardware": _multi_progress.get("hardware"),
+            "updated": _multi_progress.get("updated"),
+            "active_count": len(_multi_progress["videos"]),
+        }
         with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
-            json.dump(_current_progress, f)
+            json.dump(output, f, indent=2)
     except:
         pass
+
+
+def set_hardware_info(hardware: dict):
+    """Set hardware info in progress."""
+    with _progress_lock:
+        _multi_progress["hardware"] = hardware
+        _write_progress()
 
 
 def log(msg: str, level: str = "INFO"):
@@ -130,7 +360,7 @@ DEFAULT_SUBTITLE_TEMPLATE = {
     "ken_burns_intensity": "subtle",
     "video_transition": "random",
     # NV overlay settings
-    "nv_overlay_enabled": True,
+    "nv_overlay_enabled": False,
     "nv_overlay_position": "left",
     "nv_overlay_v_position": "middle",
     "nv_overlay_scale": 0.50,
@@ -406,11 +636,22 @@ def get_required_scene_ids(excel_path: Path) -> Set[str]:
         import openpyxl
         wb = openpyxl.load_workbook(excel_path)
 
+        # Find sheet with scene data (must have more than just header row)
+        # Priority: sheets with 'scene' in name, then 'srt_coverage' as fallback
         scenes_sheet = None
+        fallback_sheet = None
         for sheet_name in wb.sheetnames:
-            if 'scene' in sheet_name.lower():
-                scenes_sheet = wb[sheet_name]
+            candidate = wb[sheet_name]
+            if candidate.max_row <= 1:
+                continue
+            if 'scene' in sheet_name.lower() and sheet_name.lower() != 'srt_coverage':
+                scenes_sheet = candidate
                 break
+            elif sheet_name.lower() == 'srt_coverage':
+                fallback_sheet = candidate
+
+        if not scenes_sheet and fallback_sheet:
+            scenes_sheet = fallback_sheet
 
         if not scenes_sheet:
             return set()
@@ -671,6 +912,21 @@ def scan_visual_projects() -> List[Dict]:
         info = get_project_info(item)
         code = info["code"]
 
+        # Skip if already being processed (prevent duplicate processing)
+        with _processing_lock:
+            if code in _processing_codes:
+                log(f"    - {code}: SKIPPED (already processing)")
+                continue
+
+        # Backup: delete PROJECTS/{code} if it exists (VM should have deleted, but just in case)
+        projects_folder = PROJECTS_DIR / code
+        if projects_folder.exists():
+            try:
+                shutil.rmtree(projects_folder)
+                log(f"    - {code}: cleaned up PROJECTS folder (backup)")
+            except Exception as e:
+                log(f"    - {code}: cannot cleanup PROJECTS: {e}", "WARN")
+
         if info["already_done"]:
             log(f"    - {code}: already done")
         elif info["ready_for_edit"]:
@@ -857,21 +1113,35 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
         return True
 
     # Wait for Excel to be stable before opening
+    update_progress(code=code, step="Checking Excel", percent=1)
     if not is_file_stable(excel_path):
         return False, None, "Excel file is still being written"
 
     try:
         import openpyxl
+        update_progress(code=code, step="Loading Excel", percent=2)
         wb = openpyxl.load_workbook(excel_path)
 
+        # Find sheet with scene data (must have more than just header row)
+        # Priority: sheets with 'scene' in name, then 'srt_coverage' as fallback
         scenes_sheet = None
+        fallback_sheet = None
         for sheet_name in wb.sheetnames:
-            if 'scene' in sheet_name.lower():
-                scenes_sheet = wb[sheet_name]
+            candidate = wb[sheet_name]
+            if candidate.max_row <= 1:
+                continue  # Skip empty sheets
+            if 'scene' in sheet_name.lower() and sheet_name.lower() != 'srt_coverage':
+                scenes_sheet = candidate
                 break
+            elif sheet_name.lower() == 'srt_coverage':
+                fallback_sheet = candidate
+
+        # Use fallback if no primary sheet found
+        if not scenes_sheet and fallback_sheet:
+            scenes_sheet = fallback_sheet
 
         if not scenes_sheet:
-            return False, None, "No Scenes sheet in Excel"
+            return False, None, "No Scenes sheet with data in Excel"
 
         headers = [cell.value for cell in scenes_sheet[1]]
 
@@ -952,6 +1222,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
 
         media_items.sort(key=lambda x: x['start'])
         plog(f"  Found {len(media_items)} media: {video_count} videos, {image_count} images")
+        update_progress(code=code, step=f"Found {len(media_items)} media", percent=3)
 
         # Handle gap at start
         GAP_THRESHOLD = 0.5
@@ -996,6 +1267,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             temp_video = Path(temp_dir) / "temp_video.mp4"
 
             # Load settings from channel template (per-channel customization)
+            update_progress(code=code, step="Loading settings", percent=4)
             channel_template = get_subtitle_template(code)
             channel = code.split("-")[0] if "-" in code else code
 
@@ -1024,33 +1296,58 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             except:
                 pass
 
+            # Get prefer_gpu setting from template (default: auto)
+            # "auto" = use GPU when available and compose_mode is not "quality"
+            # "always" = always prefer GPU over OpenCV (faster but slightly lower quality)
+            # "never" = always use OpenCV when available
+            prefer_gpu = channel_template.get("prefer_gpu", "auto").lower()
+
             plog(f"  Channel: {channel} | Res: {output_resolution.upper()} | Mode: {compose_mode}")
 
             # Determine if using xfade transitions (mix/wipe need xfade filter)
             use_xfade = video_transition in ["mix", "wipe", "random"]
             FADE_DURATION = transition_duration if use_xfade else 0.4
 
-            # Use OpenCV Ken Burns for quality/balanced modes
-            use_opencv_kb = KEN_BURNS_CV2_AVAILABLE and compose_mode in ["quality", "balanced"]
+            # Use cached system resources (detected once at startup)
+            resources = get_system_resources()
+            use_gpu = resources.get("gpu_available", False)
+            gpu_encoder = resources.get("gpu_encoder", "libx264")
 
-            # Detect GPU for FFmpeg fallback
-            use_gpu = False
-            gpu_encoder = "libx264"
-            try:
-                gpu_check = subprocess.run(["ffmpeg", "-encoders"], capture_output=True, text=True, timeout=5, creationflags=SUBPROCESS_FLAGS)
-                if "h264_nvenc" in gpu_check.stdout:
-                    use_gpu = True
-                    gpu_encoder = "h264_nvenc"
-                    plog(f"  GPU Encoder: NVENC")
-            except:
-                pass
+            if use_gpu:
+                plog(f"  GPU Encoder: {gpu_encoder.upper()}")
+
+            # Determine whether to use OpenCV Ken Burns or FFmpeg
+            # OpenCV = higher quality but CPU intensive
+            # FFmpeg+GPU = faster but slightly lower Ken Burns quality
+            if prefer_gpu == "always" and use_gpu:
+                # Force GPU mode - skip OpenCV
+                use_opencv_kb = False
+                plog(f"  Mode: GPU-accelerated (prefer_gpu=always)")
+            elif prefer_gpu == "never":
+                # Force OpenCV mode
+                use_opencv_kb = KEN_BURNS_CV2_AVAILABLE and compose_mode in ["quality", "balanced"]
+            else:  # auto
+                # Default: use OpenCV for quality/balanced, GPU for fast
+                if compose_mode == "fast" or not KEN_BURNS_CV2_AVAILABLE:
+                    use_opencv_kb = False
+                else:
+                    use_opencv_kb = compose_mode in ["quality", "balanced"]
 
             # Initialize Ken Burns generator
             # For xfade transitions, don't apply individual clip fades (xfade handles it)
             clip_fade_duration = 0.0 if use_xfade else FADE_DURATION
+
+            # OPTIMIZATION: Render at 1080p internally, upscale to final resolution later
+            # This reduces processing time by ~4x for 4K output
+            final_output_resolution = output_resolution
+            final_output_size = QUALITY_PRESETS.get(output_resolution, QUALITY_PRESETS["1080p"])
+            render_resolution = "1080p"  # Always render at 1080p for speed
+            render_size = QUALITY_PRESETS["1080p"]
+            needs_upscale = output_resolution in ["4k", "2k"]
+
             if use_opencv_kb:
                 ken_burns = KenBurnsCv2(
-                    output_resolution=output_resolution,
+                    output_resolution=render_resolution,  # Render at 1080p
                     fps=output_fps,
                     fade_duration=clip_fade_duration,
                     intensity=kb_intensity
@@ -1069,10 +1366,20 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                     else:
                         img = cv2.imread(str(first_media))
                         h, w = img.shape[:2]
-                    output_size = ken_burns.detect_optimal_resolution(w, h)
-                else:
-                    output_size = QUALITY_PRESETS.get(output_resolution, QUALITY_PRESETS["1080p"])
-                plog(f"  Output: {output_size[0]}x{output_size[1]} @ {output_fps}fps")
+                    final_output_size = ken_burns.detect_optimal_resolution(w, h)
+                    # Still render at lower res for speed
+                    if final_output_size[0] >= 3840:
+                        render_size = QUALITY_PRESETS["1080p"]
+                        needs_upscale = True
+                    elif final_output_size[0] >= 2560:
+                        render_size = QUALITY_PRESETS["1080p"]
+                        needs_upscale = True
+                    else:
+                        render_size = final_output_size
+                        needs_upscale = False
+
+                output_size = render_size  # Use render size for clip creation
+                plog(f"  Render: {render_size[0]}x{render_size[1]} -> Final: {final_output_size[0]}x{final_output_size[1]} @ {output_fps}fps")
             else:
                 # Fallback to FFmpeg Ken Burns
                 ken_burns = KenBurnsGenerator(1920, 1080, intensity="normal")
@@ -1082,7 +1389,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             plog(f"  Transition: {video_transition.upper()} ({transition_duration}s)")
             plog(f"  Creating {len(media_items)} clips with {CLIP_WORKERS} parallel workers...")
             total_clips = len(media_items)
-            update_progress(step="Creating clips", percent=5, clip_total=total_clips)
+            update_progress(code=code, step="Creating clips", percent=5, clip_total=total_clips)
 
             # Helper function for creating a single clip
             def create_single_clip(task_args):
@@ -1093,6 +1400,16 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                 target_duration = item_data['duration']
                 is_video = item_data['is_video']
                 success = False
+
+                # Pre-validate image file (skip corrupted images)
+                if not is_video:
+                    try:
+                        from PIL import Image
+                        with Image.open(media_path) as test_img:
+                            test_img.load()  # Force load to detect corruption
+                    except Exception as e:
+                        print(f"    Cannot read image: {media_path}")
+                        return (idx, False, None)  # Skip this image
 
                 # Create worker-local Ken Burns instance for thread safety
                 worker_kb = None
@@ -1172,7 +1489,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                             cmd_clip = [
                                 "ffmpeg", "-y", "-loop", "1", "-t", str(target_duration),
                                 "-i", abs_path, "-vf", vf, "-c:v", kb_config['gpu_encoder'],
-                                "-preset", "p4", "-rc", "vbr", "-cq", "22",
+                                "-preset", "p5", "-rc", "vbr", "-cq", "22",
                                 "-pix_fmt", "yuv420p", "-r", str(kb_config['fps']), str(clip_path)
                             ]
                         else:
@@ -1189,13 +1506,14 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                 return (idx, success, str(clip_path) if success and clip_path.exists() else None)
 
             # Prepare config for workers
+            # Use render_resolution (1080p) for clip creation, upscale to final later
             kb_config = {
                 'use_opencv': use_opencv_kb,
-                'resolution': output_resolution,
+                'resolution': render_resolution,  # Render at 1080p for speed
                 'fps': output_fps,
                 'fade_duration': clip_fade_duration,
                 'intensity': kb_intensity,
-                'output_size': output_size,
+                'output_size': render_size,  # Use render size (1080p)
                 'use_xfade': use_xfade,
                 'fade_dur': FADE_DURATION,
                 'use_gpu': use_gpu,
@@ -1223,7 +1541,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
 
                     completed_count += 1
                     clip_percent = 5 + int(completed_count / total_clips * 65)
-                    update_progress(clip_current=completed_count, percent=clip_percent)
+                    update_progress(code=code, clip_current=completed_count, percent=clip_percent)
 
                     if completed_count % 20 == 0:
                         plog(f"  ... {completed_count}/{total_clips} clips")
@@ -1237,48 +1555,84 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             plog(f"  Created {len(clip_paths)} clips...")
 
             # Re-encode clips for high quality xfade (avoid artifacts during crossfade)
-            # Only needed when using xfade transitions
+            # Also upscale to final resolution if needed (1080p -> 4K)
             if use_xfade and len(clip_paths) > 1:
-                plog(f"  Re-encoding clips for smooth crossfade...")
-                update_progress(step="Optimizing clips", percent=72)
+                upscale_msg = f" + upscale to {final_output_size[0]}x{final_output_size[1]}" if needs_upscale else ""
+                plog(f"  Re-encoding {len(clip_paths)} clips for smooth crossfade{upscale_msg} (parallel)...")
+                update_progress(code=code, step="Optimizing clips", percent=72)
 
-                reencoded_paths = []
-                for i, cp in enumerate(clip_paths):
-                    reenc_path = Path(temp_dir) / f"hq_{i:03d}.mp4"
+                def reencode_single_clip(args):
+                    """Re-encode a single clip - runs in parallel."""
+                    i, cp, temp_dir_path, use_gpu_enc, gpu_enc, do_upscale, final_size = args
+                    reenc_path = Path(temp_dir_path) / f"hq_{i:03d}.mp4"
 
-                    # Re-encode with high quality, consistent format
-                    if use_gpu:
-                        reencode_cmd = [
+                    # Build scale filter for upscaling
+                    scale_filter = f"scale={final_size[0]}:{final_size[1]}:flags=lanczos" if do_upscale else ""
+
+                    if use_gpu_enc:
+                        base_cmd = [
                             "ffmpeg", "-y", "-i", str(cp),
-                            "-c:v", gpu_encoder, "-preset", "p5",
-                            "-rc", "vbr", "-cq", "18", "-b:v", "20M",
-                            "-pix_fmt", "yuv420p", "-an",
-                            str(reenc_path)
                         ]
+                        if scale_filter:
+                            base_cmd.extend(["-vf", scale_filter])
+                        base_cmd.extend([
+                            "-c:v", gpu_enc, "-preset", "p5",
+                            "-rc", "vbr", "-cq", "18", "-b:v", "25M",
+                            "-pix_fmt", "yuv420p", "-r", "30", "-an",
+                            str(reenc_path)
+                        ])
+                        reencode_cmd = base_cmd
                     else:
-                        reencode_cmd = [
+                        base_cmd = [
                             "ffmpeg", "-y", "-i", str(cp),
+                        ]
+                        if scale_filter:
+                            base_cmd.extend(["-vf", scale_filter])
+                        base_cmd.extend([
                             "-c:v", "libx264", "-preset", "fast", "-crf", "17",
-                            "-profile:v", "high", "-pix_fmt", "yuv420p", "-an",
+                            "-profile:v", "high", "-pix_fmt", "yuv420p", "-r", "30", "-an",
                             str(reenc_path)
-                        ]
+                        ])
+                        reencode_cmd = base_cmd
 
-                    result = subprocess.run(reencode_cmd, capture_output=True, text=True, timeout=120, creationflags=SUBPROCESS_FLAGS)
-                    if result.returncode == 0 and reenc_path.exists():
-                        reencoded_paths.append(reenc_path)
-                        # Delete original to save space
-                        try:
-                            cp.unlink()
-                        except:
-                            pass
-                    else:
-                        # Keep original if re-encode fails
-                        reencoded_paths.append(cp)
+                    try:
+                        result = subprocess.run(reencode_cmd, capture_output=True, text=True, timeout=180, creationflags=SUBPROCESS_FLAGS)
+                        if result.returncode == 0 and reenc_path.exists():
+                            # Delete original to save space
+                            try:
+                                cp.unlink()
+                            except:
+                                pass
+                            return (i, reenc_path)
+                        else:
+                            return (i, cp)  # Keep original if re-encode fails
+                    except:
+                        return (i, cp)
 
-                clip_paths = reencoded_paths
+                # Prepare tasks for parallel re-encoding
+                # Include upscale parameters: (i, cp, temp_dir, use_gpu, gpu_encoder, needs_upscale, final_output_size)
+                reencode_tasks = [(i, cp, temp_dir, use_gpu, gpu_encoder, needs_upscale, final_output_size) for i, cp in enumerate(clip_paths)]
+
+                # Use parallel workers (limit to 4 for GPU to avoid VRAM issues with parallel videos)
+                reencode_workers = min(4, CLIP_WORKERS) if use_gpu else CLIP_WORKERS
+                reencoded_results = []
+
+                with ThreadPoolExecutor(max_workers=reencode_workers) as executor:
+                    futures = {executor.submit(reencode_single_clip, task): task[0] for task in reencode_tasks}
+                    completed = 0
+                    for future in as_completed(futures):
+                        result = future.result()
+                        reencoded_results.append(result)
+                        completed += 1
+                        if completed % 10 == 0:
+                            update_progress(code=code, step="Optimizing clips", clip_current=completed, clip_total=len(clip_paths))
+
+                # Sort by index to maintain order
+                reencoded_results.sort(key=lambda x: x[0])
+                clip_paths = [r[1] for r in reencoded_results]
                 plog(f"  Re-encoded {len(clip_paths)} clips")
 
-            update_progress(step="Concatenating", percent=75)
+            update_progress(code=code, step="Concatenating", percent=75)
 
             # Concat with appropriate transition
             if use_xfade and len(clip_paths) > 1:
@@ -1354,22 +1708,29 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                         str(batch_output)
                     ]
 
-                    result = subprocess.run(cmd_batch, capture_output=True, text=True, timeout=600, creationflags=SUBPROCESS_FLAGS)
-                    if result.returncode == 0 and batch_output.exists():
-                        return batch_output
-                    return None
+                    try:
+                        result = subprocess.run(cmd_batch, capture_output=True, text=True, timeout=1200, creationflags=SUBPROCESS_FLAGS)
+                        if result.returncode == 0 and batch_output.exists():
+                            return batch_output
+                        return None
+                    except subprocess.TimeoutExpired:
+                        plog(f"    xfade batch timed out (1200s)", "WARN")
+                        return None
 
                 # Process in batches to avoid Windows command line length limit
-                BATCH_SIZE = 40  # Safe batch size for Windows
+                BATCH_SIZE = 15  # Small batches for reliable xfade in parallel mode
                 xfade_success = False
 
                 if len(clip_paths) <= BATCH_SIZE:
                     # Small video - process all at once
                     plog(f"  Using xfade transitions ({video_transition})...")
-                    batch_output = xfade_batch(clip_paths, 0, temp_dir)
-                    if batch_output:
-                        shutil.move(str(batch_output), str(temp_video))
-                        xfade_success = True
+                    try:
+                        batch_output = xfade_batch(clip_paths, 0, temp_dir)
+                        if batch_output:
+                            shutil.move(str(batch_output), str(temp_video))
+                            xfade_success = True
+                    except Exception as e:
+                        plog(f"  xfade exception: {e}", "WARN")
                 else:
                     # Large video - process in batches
                     plog(f"  Processing {len(clip_paths)} clips in batches of {BATCH_SIZE}...")
@@ -1377,7 +1738,11 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                     for batch_idx in range(0, len(clip_paths), BATCH_SIZE):
                         batch_clips = clip_paths[batch_idx:batch_idx + BATCH_SIZE]
                         plog(f"    Batch {batch_idx // BATCH_SIZE + 1}: clips {batch_idx + 1}-{batch_idx + len(batch_clips)}")
-                        batch_output = xfade_batch(batch_clips, batch_idx // BATCH_SIZE, temp_dir)
+                        try:
+                            batch_output = xfade_batch(batch_clips, batch_idx // BATCH_SIZE, temp_dir)
+                        except Exception as e:
+                            plog(f"    Batch {batch_idx // BATCH_SIZE + 1} exception: {e}", "WARN")
+                            batch_output = None
                         if batch_output:
                             batch_outputs.append(batch_output)
                         else:
@@ -1393,19 +1758,44 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                                 f.write(f"file '{str(bp).replace(chr(92), '/')}'\n")
                         cmd_final = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(batch_list), "-c", "copy", str(temp_video)]
                         result = subprocess.run(cmd_final, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
-                        xfade_success = result.returncode == 0
+                        if result.returncode == 0:
+                            # Verify xfade output duration
+                            probe_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                         "-of", "default=noprint_wrappers=1:nokey=1", str(temp_video)]
+                            probe_r = subprocess.run(probe_cmd, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
+                            xfade_dur = float(probe_r.stdout.strip()) if probe_r.stdout.strip() else 0
+                            plog(f"  xfade duration: {xfade_dur:.1f}s (expected ~{total_duration:.1f}s)")
+                            if xfade_dur >= total_duration * 0.5:
+                                xfade_success = True
+                            else:
+                                plog(f"  xfade output too short, will use fallback", "WARN")
 
                 if not xfade_success:
-                    plog(f"  xfade failed, falling back to simple concat", "WARN")
-                    # Fallback to simple concat
+                    plog(f"  xfade failed, falling back to CPU re-encode concat", "WARN")
+                    # Fallback: CPU re-encode concat with scale filter (reliable, no GPU contention)
                     list_file = Path(temp_dir) / "clips.txt"
                     with open(list_file, 'w', encoding='utf-8') as f:
                         for cp in clip_paths:
                             f.write(f"file '{str(cp).replace(chr(92), '/')}'\n")
-                    cmd_concat = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(temp_video)]
-                    result = subprocess.run(cmd_concat, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
+                    # Always use CPU (libx264) for fallback to avoid GPU contention in parallel mode
+                    # Add scale filter to handle mixed resolutions (some 4K, some 1080p)
+                    fw, fh = final_output_size if needs_upscale else output_size
+                    cmd_concat = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
+                                  "-vf", f"scale={fw}:{fh}:flags=lanczos",
+                                  "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                                  "-pix_fmt", "yuv420p", "-r", str(output_fps), str(temp_video)]
+                    result = subprocess.run(cmd_concat, capture_output=True, text=True, timeout=7200, creationflags=SUBPROCESS_FLAGS)
                     if result.returncode != 0:
                         return False, None, f"Concat error: {result.stderr[-200:]}"
+                    # Verify concat duration
+                    probe_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                 "-of", "default=noprint_wrappers=1:nokey=1", str(temp_video)]
+                    probe_r = subprocess.run(probe_cmd, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
+                    concat_dur = float(probe_r.stdout.strip()) if probe_r.stdout.strip() else 0
+                    expected_dur = total_duration
+                    plog(f"  Concat duration: {concat_dur:.1f}s (expected ~{expected_dur:.1f}s)")
+                    if concat_dur < expected_dur * 0.5:
+                        return False, None, f"Concat too short: {concat_dur:.1f}s vs expected {expected_dur:.1f}s"
             else:
                 # Simple concat (for fade_black or single clip)
                 list_file = Path(temp_dir) / "clips.txt"
@@ -1420,7 +1810,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
 
             # Add audio
             temp_with_audio = Path(temp_dir) / "with_audio.mp4"
-            update_progress(step="Adding audio", percent=85)
+            update_progress(code=code, step="Adding audio", percent=85)
             plog("  Adding voice...")
             cmd2 = ["ffmpeg", "-y", "-i", str(temp_video), "-i", str(voice_path),
                    "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(temp_with_audio)]
@@ -1431,7 +1821,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             # Burn subtitles
             temp_with_subs = Path(temp_dir) / "with_subs.mp4"
             if srt_path and srt_path.exists():
-                update_progress(step="Burning subtitles", percent=90)
+                update_progress(code=code, step="Burning subtitles", percent=90)
                 plog("  Burning subtitles...")
                 srt_escaped = str(srt_path).replace('\\', '/').replace(':', '\\:')
 
@@ -1446,7 +1836,13 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                 )
                 vf_filter = f"subtitles='{srt_escaped}':fontsdir='{fonts_dir}':force_style='{subtitle_style}'"
 
-                cmd3 = ["ffmpeg", "-y", "-i", str(temp_with_audio), "-vf", vf_filter, "-c:a", "copy", str(temp_with_subs)]
+                if use_gpu:
+                    cmd3 = ["ffmpeg", "-y", "-i", str(temp_with_audio),
+                            "-vf", vf_filter,
+                            "-c:v", gpu_encoder, "-preset", "p5", "-rc", "vbr", "-cq", "20", "-b:v", "15M",
+                            "-c:a", "copy", str(temp_with_subs)]
+                else:
+                    cmd3 = ["ffmpeg", "-y", "-i", str(temp_with_audio), "-vf", vf_filter, "-c:a", "copy", str(temp_with_subs)]
                 result = subprocess.run(cmd3, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
                 if result.returncode != 0:
                     plog(f"  Subtitle burn failed: {result.stderr[-100:]}", "WARN")
@@ -1464,7 +1860,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
 
             nv_path = find_nv_image(code, project_dir) if nv_enabled else None
             if nv_path:
-                update_progress(step="Adding NV overlay", percent=95)
+                update_progress(code=code, step="Adding NV overlay", percent=95)
                 plog(f"  Adding NV overlay: {nv_path.name} ({nv_position}-{nv_v_position}, {int(nv_scale*100)}%, crop={nv_crop_ratio})")
                 if overlay_nv_on_video(temp_with_subs, nv_path, output_path,
                                        position=nv_position, v_position=nv_v_position,
@@ -1478,7 +1874,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                 # No NV image or disabled, just copy the video with subtitles
                 shutil.copy(temp_with_subs, output_path)
 
-            update_progress(step="Done", percent=100, status="completed")
+            update_progress(code=code, step="Done", percent=100, status="completed")
             plog(f"  Video done: {output_path.name}", "OK")
             return True, output_path, None
 
@@ -1738,12 +2134,14 @@ def delete_visual_project(project_info: Dict, callback=None) -> bool:
         return False
 
 
-def cleanup_source_data(code: str, callback=None) -> bool:
+def cleanup_source_data(code: str, callback=None, max_retries: int = 3) -> bool:
     """Clean up source data after video is complete.
 
-    Deletes:
-    - Voice files from D:/AUTO/voice/{code}.*
-    - PROJECTS/{code}/ folder
+    Deletes (with retry):
+    1. VISUAL/{code}/ folder
+    2. Voice files from D:/AUTO/voice/{code}.*
+
+    Note: PROJECTS/{code}/ is deleted earlier in scan_visual_projects() when code appears in VISUAL.
     """
     def plog(msg, level="INFO"):
         if callback:
@@ -1751,46 +2149,118 @@ def cleanup_source_data(code: str, callback=None) -> bool:
         else:
             log(f"[{code}] {msg}", level)
 
-    deleted_count = 0
+    def safe_delete(path: Path, description: str) -> bool:
+        """Delete file/folder with retry logic."""
+        if not path.exists():
+            return True
 
-    # Delete from PROJECTS folder
-    projects_dir = PROJECTS_DIR / code
-    if projects_dir.exists():
-        try:
-            shutil.rmtree(projects_dir)
-            plog(f"Deleted PROJECTS folder: {code}")
-            deleted_count += 1
-        except Exception as e:
-            plog(f"Cannot delete PROJECTS folder: {e}", "WARN")
-
-    # Delete from voice folder (files matching {code}.*)
-    if VOICE_DIR.exists():
-        for item in VOICE_DIR.iterdir():
-            if item.name.startswith(code + ".") or item.name == code:
-                try:
-                    if item.is_dir():
-                        shutil.rmtree(item)
-                    else:
-                        item.unlink()
-                    plog(f"Deleted voice file: {item.name}")
-                    deleted_count += 1
-                except Exception as e:
-                    plog(f"Cannot delete voice file {item.name}: {e}", "WARN")
-
-        # Also check subfolders in voice (for voice/{code}/ structure)
-        voice_subdir = VOICE_DIR / code
-        if voice_subdir.exists() and voice_subdir.is_dir():
+        for attempt in range(max_retries):
             try:
-                shutil.rmtree(voice_subdir)
-                plog(f"Deleted voice subfolder: {code}")
-                deleted_count += 1
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+                plog(f"Deleted {description}: {path.name}")
+                return True
+            except PermissionError:
+                if attempt < max_retries - 1:
+                    plog(f"  {description} in use, retry {attempt + 2}/{max_retries}...", "WARN")
+                    time.sleep(2)  # Wait 2 seconds before retry
+                else:
+                    plog(f"Cannot delete {description}: file in use (will retry later)", "WARN")
             except Exception as e:
-                plog(f"Cannot delete voice subfolder: {e}", "WARN")
+                plog(f"Cannot delete {description}: {e}", "WARN")
+                break
+        return False
+
+    deleted_count = 0
+    failed_items = []
+
+    # 1. Delete from VISUAL folder
+    visual_dir = VISUAL_DIR / code
+    if visual_dir.exists():
+        if safe_delete(visual_dir, "VISUAL folder"):
+            deleted_count += 1
+        else:
+            failed_items.append(str(visual_dir))
+
+    # 2. Delete from voice folder (files matching {code}.*)
+    if VOICE_DIR.exists():
+        # Delete files at root level (e.g. voice/KA1-0001.txt)
+        for item in VOICE_DIR.iterdir():
+            if item.is_file() and (item.name.startswith(code + ".") or item.name.startswith(code + "-")):
+                if safe_delete(item, "voice file"):
+                    deleted_count += 1
+                else:
+                    failed_items.append(str(item))
+
+        # Delete inside template subfolders (e.g. voice/KA1-T3/KA1-0001.mp3)
+        for subdir in VOICE_DIR.iterdir():
+            if subdir.is_dir():
+                for item in subdir.iterdir():
+                    if item.name.startswith(code + ".") or item.name.startswith(code + "-") or item.name == code:
+                        if safe_delete(item, f"voice file ({subdir.name})"):
+                            deleted_count += 1
+                        else:
+                            failed_items.append(str(item))
 
     if deleted_count > 0:
         plog(f"Cleanup complete: {deleted_count} items deleted")
 
-    return deleted_count > 0
+    if failed_items:
+        plog(f"Failed to delete {len(failed_items)} items (will retry next scan)", "WARN")
+
+    return len(failed_items) == 0
+
+
+def cleanup_leftover_done_projects() -> int:
+    """Clean up leftover folders for projects that are already done.
+
+    This catches cases where cleanup failed or was interrupted.
+    Runs at the start of each scan cycle.
+    """
+    cleaned_count = 0
+
+    if not DONE_DIR.exists():
+        return 0
+
+    # Get all codes that have completed videos in DONE folder
+    done_codes = set()
+    for item in DONE_DIR.iterdir():
+        if item.is_dir():
+            mp4_files = list(item.glob("*.mp4"))
+            if mp4_files:
+                done_codes.add(item.name)
+
+    if not done_codes:
+        return 0
+
+    # Check PROJECTS folder for leftover folders
+    if PROJECTS_DIR.exists():
+        for item in PROJECTS_DIR.iterdir():
+            if item.is_dir() and item.name in done_codes:
+                try:
+                    shutil.rmtree(item)
+                    log(f"  [CLEANUP] Removed leftover PROJECTS/{item.name}")
+                    cleaned_count += 1
+                except Exception as e:
+                    log(f"  [CLEANUP] Cannot remove PROJECTS/{item.name}: {e}", "WARN")
+
+    # Check VISUAL folder for leftover folders
+    if VISUAL_DIR.exists():
+        for item in VISUAL_DIR.iterdir():
+            if item.is_dir() and item.name in done_codes:
+                try:
+                    shutil.rmtree(item)
+                    log(f"  [CLEANUP] Removed leftover VISUAL/{item.name}")
+                    cleaned_count += 1
+                except Exception as e:
+                    log(f"  [CLEANUP] Cannot remove VISUAL/{item.name}: {e}", "WARN")
+
+    if cleaned_count > 0:
+        log(f"  [CLEANUP] Total: {cleaned_count} leftover folders removed")
+
+    return cleaned_count
 
 
 # ============================================================================
@@ -2004,94 +2474,162 @@ def process_project(project_info: Dict, callback=None) -> bool:
         else:
             log(f"[{code}] {msg}", level)
 
-    plog("="*50)
-    plog(f"Processing: {code}")
-    plog("="*50)
+    # Mark as processing (prevent duplicate processing)
+    with _processing_lock:
+        if code in _processing_codes:
+            plog("Already being processed by another worker, skipping...", "WARN")
+            return False
+        _processing_codes.add(code)
 
-    # Check if folder is stable (VM finished copying)
-    plog("Checking if folder is stable (VM copy complete)...")
-    if not is_folder_stable(project_dir):
-        plog("Folder is still being copied, skipping for now...", "WARN")
-        return False
+    try:
+        plog("="*50)
+        plog(f"Processing: {code}")
+        plog("="*50)
 
-    plog(f"Media: {project_info['video_count']} videos + {project_info['image_count']} images")
-    plog(f"Scenes: {project_info['total_scenes']}")
+        # Check if folder is stable (VM finished copying)
+        update_progress(code=code, step="Checking folder", percent=0, status="composing")
+        plog("Checking if folder is stable (VM copy complete)...")
+        if not is_folder_stable(project_dir):
+            plog("Folder is still being copied, skipping for now...", "WARN")
+            return False
 
-    success, video_path, error = compose_video(project_info, callback)
-    if not success:
-        plog(f"Compose failed: {error}", "ERROR")
-        return False
+        plog(f"Media: {project_info['video_count']} videos + {project_info['image_count']} images")
+        plog(f"Scenes: {project_info['total_scenes']}")
 
-    success, error = copy_to_done(project_info, video_path, callback)
-    if not success:
-        plog(f"Copy failed: {error}", "ERROR")
-        return False
+        success, video_path, error = compose_video(project_info, callback)
+        if not success:
+            plog(f"Compose failed: {error}", "ERROR")
+            return False
 
-    # Generate thumbnail if thumb folder exists
-    generate_thumbnail_for_project(project_info, callback)
+        success, error = copy_to_done(project_info, video_path, callback)
+        if not success:
+            plog(f"Copy failed: {error}", "ERROR")
+            return False
 
-    delete_visual_project(project_info, callback)
+        # Generate thumbnail if thumb folder exists
+        generate_thumbnail_for_project(project_info, callback)
 
-    # Update sheet status with aggressive retry (MUST succeed before cleanup)
-    sheet_updated = False
-    max_sheet_retries = 10
-    for sheet_attempt in range(max_sheet_retries):
-        found, updated = update_sheet_status([code], callback)
-        if updated > 0:
-            plog(f"Sheet updated: {STATUS_VALUE}")
-            sheet_updated = True
-            break
-        elif found > 0:
-            # Found but already had correct status
-            plog(f"Sheet already has correct status")
-            sheet_updated = True
-            break
-        else:
-            # Not found or error - retry
-            if sheet_attempt < max_sheet_retries - 1:
-                delay = min(30, 5 * (sheet_attempt + 1))  # 5s, 10s, 15s... max 30s
-                plog(f"Sheet update failed, retrying in {delay}s... (attempt {sheet_attempt + 1}/{max_sheet_retries})", "WARN")
-                time.sleep(delay)
+        delete_visual_project(project_info, callback)
 
-    if not sheet_updated:
-        plog(f"CRITICAL: Sheet update failed after {max_sheet_retries} attempts! NOT cleaning up source data.", "ERROR")
-        plog(f"Please manually update sheet for code: {code}", "ERROR")
-        # Still return True because video is done, but don't cleanup
+        # Update sheet status with aggressive retry (MUST succeed before cleanup)
+        sheet_updated = False
+        max_sheet_retries = 10
+        for sheet_attempt in range(max_sheet_retries):
+            found, updated = update_sheet_status([code], callback)
+            if updated > 0:
+                plog(f"Sheet updated: {STATUS_VALUE}")
+                sheet_updated = True
+                break
+            elif found > 0:
+                # Found but already had correct status
+                plog(f"Sheet already has correct status")
+                sheet_updated = True
+                break
+            else:
+                # Not found or error - retry
+                if sheet_attempt < max_sheet_retries - 1:
+                    delay = min(30, 5 * (sheet_attempt + 1))  # 5s, 10s, 15s... max 30s
+                    plog(f"Sheet update failed, retrying in {delay}s... (attempt {sheet_attempt + 1}/{max_sheet_retries})", "WARN")
+                    time.sleep(delay)
+
+        if not sheet_updated:
+            plog(f"CRITICAL: Sheet update failed after {max_sheet_retries} attempts! NOT cleaning up source data.", "ERROR")
+            plog(f"Please manually update sheet for code: {code}", "ERROR")
+            # Still return True because video is done, but don't cleanup
+            return True
+
+        # Clean up source data (voice folder + PROJECTS folder) ONLY after sheet is updated
+        cleanup_source_data(code, callback)
+
+        plog(f"DONE: {code}")
         return True
 
-    # Clean up source data (voice folder + PROJECTS folder) ONLY after sheet is updated
-    cleanup_source_data(code, callback)
-
-    plog(f"DONE: {code}")
-    return True
+    finally:
+        # Always remove from processing set (whether success or failure)
+        with _processing_lock:
+            _processing_codes.discard(code)
+        # Remove from progress tracking
+        update_progress(code=code, remove=True)
 
 
 # ============================================================================
 # MAIN
 # ============================================================================
 
-def run_scan_loop(parallel: int = DEFAULT_PARALLEL):
+def run_scan_loop(parallel: int = None):
+    # Detect system resources
+    resources = get_system_resources()
+    global CLIP_WORKERS
+    CLIP_WORKERS = get_optimal_workers(resources, "clip")
+
+    # Auto-detect optimal parallel if not specified
+    if parallel is None:
+        parallel = get_optimal_workers(resources, "parallel")
+        parallel_mode = "auto"
+    else:
+        parallel_mode = "manual"
+
     log("="*60)
     log("  VE3 TOOL - EDIT MODE (Compose MP4)")
     log("="*60)
     log(f"  VISUAL folder: {VISUAL_DIR}")
     log(f"  DONE folder:   {DONE_DIR}")
-    log(f"  Parallel:      {parallel}")
     log(f"  Scan interval: {SCAN_INTERVAL}s")
+    log("-"*60)
+    log("  HARDWARE DETECTED:")
+    log(f"    CPU cores:   {resources['cpu_physical']} physical / {resources['cpu_cores']} logical")
+    log(f"    RAM:         {resources['ram_gb']:.1f} GB")
+    log(f"    GPU:         {'NVENC Available' if resources['gpu_available'] else 'Not available (using CPU)'}")
+    log("-"*60)
+    log("  AUTO-OPTIMIZED SETTINGS:")
+    log(f"    Parallel videos: {parallel} ({parallel_mode})")
+    log(f"    Clip workers:    {CLIP_WORKERS} per video")
+    log(f"    Total threads:   ~{parallel * CLIP_WORKERS} max")
     log("="*60)
 
-    # Reset progress on start
-    update_progress(code="", step="Waiting", percent=0, clip_current=0, clip_total=0, status="idle")
+    # Set hardware info in progress for GUI
+    set_hardware_info({
+        "cpu_cores": resources['cpu_cores'],
+        "cpu_physical": resources['cpu_physical'],
+        "ram_gb": round(resources['ram_gb'], 1),
+        "gpu": "NVENC" if resources['gpu_available'] else "CPU",
+        "clip_workers": CLIP_WORKERS,
+        "parallel": parallel,
+    })
+
+    # Clear any stale progress on start
+    with _progress_lock:
+        _multi_progress["videos"] = {}
+        _write_progress()
 
     DONE_DIR.mkdir(parents=True, exist_ok=True)
 
     cycle = 0
+    fail_counts = {}  # Track consecutive failures per code
+    MAX_FAILURES = 3  # Skip after this many consecutive failures
 
     while True:
         cycle += 1
         log(f"\n[CYCLE {cycle}] Scanning VISUAL folder...")
 
+        # First, clean up any leftover folders from already-done projects
+        cleanup_leftover_done_projects()
+
         pending = scan_visual_projects()
+
+        # Filter out codes that have failed too many times
+        skipped = []
+        filtered = []
+        for p in pending:
+            code = p["code"]
+            if fail_counts.get(code, 0) >= MAX_FAILURES:
+                skipped.append(code)
+            else:
+                filtered.append(p)
+        pending = filtered
+
+        if skipped:
+            log(f"  [SKIP] {len(skipped)} broken projects (failed {MAX_FAILURES}+ times): {', '.join(skipped)}", "WARN")
 
         if not pending:
             log("  No pending projects")
@@ -2111,17 +2649,25 @@ def run_scan_loop(parallel: int = DEFAULT_PARALLEL):
 
                 for future in as_completed(futures):
                     project = futures[future]
+                    code = project["code"]
                     try:
                         success = future.result()
                         if success:
-                            log(f"  {project['code']}: SUCCESS", "OK")
+                            log(f"  {code}: SUCCESS", "OK")
+                            fail_counts.pop(code, None)  # Reset on success
                         else:
-                            log(f"  {project['code']}: FAILED", "ERROR")
+                            fail_counts[code] = fail_counts.get(code, 0) + 1
+                            remaining = MAX_FAILURES - fail_counts[code]
+                            if remaining > 0:
+                                log(f"  {code}: FAILED (retry {fail_counts[code]}/{MAX_FAILURES})", "ERROR")
+                            else:
+                                log(f"  {code}: FAILED {MAX_FAILURES} times - SKIPPING from now on (broken Excel/data?)", "ERROR")
                     except Exception as e:
-                        log(f"  {project['code']}: EXCEPTION - {e}", "ERROR")
+                        fail_counts[code] = fail_counts.get(code, 0) + 1
+                        log(f"  {code}: EXCEPTION - {e}", "ERROR")
 
-            # Reset progress after batch
-            update_progress(code="", step="Waiting", percent=0, clip_current=0, clip_total=0, status="idle")
+            # Refresh progress file (videos remove themselves when done)
+            update_progress()
 
             # Immediately scan again if there were projects (continuous processing)
             log("  Batch done, scanning for more...")
@@ -2182,8 +2728,8 @@ def run_scan_only():
 def main():
     parser = argparse.ArgumentParser(description="VE3 Tool - Edit Mode (Compose MP4)")
     parser.add_argument("code", nargs="?", help="Process single project by code")
-    parser.add_argument("--parallel", "-p", type=int, default=DEFAULT_PARALLEL,
-                        help=f"Number of parallel workers (default: {DEFAULT_PARALLEL})")
+    parser.add_argument("--parallel", "-p", type=int, default=None,
+                        help="Number of parallel videos (default: auto-detect based on hardware)")
     parser.add_argument("--scan-only", action="store_true", help="Only scan and show status")
     args = parser.parse_args()
 

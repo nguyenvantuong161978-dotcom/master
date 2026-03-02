@@ -407,7 +407,7 @@ def generate(row):
         if bbox:
             cut = cut.crop(bbox)
 
-    # --- Scale nhân vật để chiều cao = chiều cao thumbnail ---
+        # Scale theo chiều cao để nhân vật to như KA2
     orig_w, orig_h = cut.size
     scale = img_h / orig_h
     new_w = int(orig_w * scale)
@@ -415,20 +415,17 @@ def generate(row):
     cut = cut.resize((new_w, new_h), Image.LANCZOS)
     orig_w, orig_h = cut.size
 
-    # Giữ căn giữa ngang như cũ (hoặc bạn đổi tùy ý)
+    # Center ngang trong panel phải
     px = panel_w + (right_w - orig_w) // 2
+    py = 0  # Top-aligned vì đã scale full height
 
-    # Chạm đáy
-    py = img_h - orig_h
+    # Nếu nhân vật rộng hơn panel, crop center để vừa
+    if orig_w > right_w:
+        crop_left = (orig_w - right_w) // 2
+        cut = cut.crop((crop_left, 0, crop_left + right_w, orig_h))
+        px = panel_w
 
-    if py < 0:
-        # Ảnh cao hơn canvas → cắt từ trên xuống để đáy vẫn chạm
-        crop_top = -py
-        region = cut.crop((0, crop_top, orig_w, orig_h))
-        canvas.paste(region, (px, 0), region)
-    else:
-        # Dán trực tiếp, sát đáy
-        canvas.paste(cut, (px, py), cut)
+    canvas.paste(cut, (px, py), cut)
 
     # Không để khoảng trống bên trái và dưới đáy
     dst_left   = panel_w

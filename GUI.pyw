@@ -301,144 +301,6 @@ class ModernButton(tk.Canvas):
         self._draw("#4a4a4a" if disabled else self.color)
 
 
-class StatCard(tk.Frame):
-    """Modern stat card with icon."""
-
-    def __init__(self, parent, icon, title, value, color, **kwargs):
-        super().__init__(parent, bg=COLORS["bg_card"], **kwargs)
-        self.config(highlightbackground=COLORS["border"], highlightthickness=1)
-
-        inner = tk.Frame(self, bg=COLORS["bg_card"])
-        inner.pack(padx=20, pady=15, fill=tk.BOTH, expand=True)
-
-        top_row = tk.Frame(inner, bg=COLORS["bg_card"])
-        top_row.pack(fill=tk.X)
-
-        tk.Label(top_row, text=icon, font=("Segoe UI", 24),
-                bg=COLORS["bg_card"], fg=color).pack(side=tk.LEFT)
-
-        self.value_label = tk.Label(top_row, text=value, font=("Segoe UI", 28, "bold"),
-                                    bg=COLORS["bg_card"], fg=color)
-        self.value_label.pack(side=tk.RIGHT)
-
-        tk.Label(inner, text=title, font=("Segoe UI", 10),
-                bg=COLORS["bg_card"], fg=COLORS["text_dim"]).pack(anchor=tk.W, pady=(10, 0))
-
-    def set_value(self, value):
-        self.value_label.config(text=str(value))
-
-
-class ProcessCard(tk.Frame):
-    """Card for process control with progress bar."""
-
-    def __init__(self, parent, title, subtitle, icon, color, on_start, on_stop, **kwargs):
-        super().__init__(parent, bg=COLORS["bg_card"], **kwargs)
-        self.config(highlightbackground=COLORS["border"], highlightthickness=1)
-        self.color = color
-        self.on_start = on_start
-        self.on_stop = on_stop
-
-        inner = tk.Frame(self, bg=COLORS["bg_card"])
-        inner.pack(padx=20, pady=20, fill=tk.BOTH, expand=True)
-
-        header = tk.Frame(inner, bg=COLORS["bg_card"])
-        header.pack(fill=tk.X)
-
-        tk.Label(header, text=icon, font=("Segoe UI", 20),
-                bg=COLORS["bg_card"], fg=color).pack(side=tk.LEFT)
-
-        title_frame = tk.Frame(header, bg=COLORS["bg_card"])
-        title_frame.pack(side=tk.LEFT, padx=(10, 0))
-
-        tk.Label(title_frame, text=title, font=("Segoe UI", 12, "bold"),
-                bg=COLORS["bg_card"], fg=COLORS["text"]).pack(anchor=tk.W)
-        tk.Label(title_frame, text=subtitle, font=("Segoe UI", 9),
-                bg=COLORS["bg_card"], fg=COLORS["text_dim"]).pack(anchor=tk.W)
-
-        status_frame = tk.Frame(inner, bg=COLORS["bg_card"])
-        status_frame.pack(fill=tk.X, pady=(15, 0))
-
-        self.status_dot = tk.Label(status_frame, text="●", font=("Segoe UI", 12),
-                                   bg=COLORS["bg_card"], fg=COLORS["error"])
-        self.status_dot.pack(side=tk.LEFT)
-
-        self.status_text = tk.Label(status_frame, text="Stopped", font=("Segoe UI", 10),
-                                    bg=COLORS["bg_card"], fg=COLORS["text_dim"])
-        self.status_text.pack(side=tk.LEFT, padx=(5, 0))
-
-        # Progress section
-        progress_frame = tk.Frame(inner, bg=COLORS["bg_card"])
-        progress_frame.pack(fill=tk.X, pady=(10, 0))
-
-        self.progress_label = tk.Label(progress_frame, text="", font=("Segoe UI", 9),
-                                       bg=COLORS["bg_card"], fg=COLORS["text_dim"])
-        self.progress_label.pack(anchor=tk.W)
-
-        # Progress bar
-        self.progress_canvas = tk.Canvas(progress_frame, height=8, bg=COLORS["bg_dark"],
-                                        highlightthickness=0)
-        self.progress_canvas.pack(fill=tk.X, pady=(5, 0))
-
-        self.percent_label = tk.Label(progress_frame, text="", font=("Segoe UI", 9, "bold"),
-                                      bg=COLORS["bg_card"], fg=color)
-        self.percent_label.pack(anchor=tk.E)
-
-        btn_frame = tk.Frame(inner, bg=COLORS["bg_card"])
-        btn_frame.pack(fill=tk.X, pady=(15, 0))
-
-        self.start_btn = ModernButton(btn_frame, "▶ Start", self._on_start,
-                                      color, width=100, height=36)
-        self.start_btn.pack(side=tk.LEFT, padx=(0, 10))
-
-        self.stop_btn = ModernButton(btn_frame, "■ Stop", self._on_stop,
-                                     COLORS["accent_red"], width=100, height=36)
-        self.stop_btn.pack(side=tk.LEFT)
-        self.stop_btn.set_disabled(True)
-
-    def _on_start(self):
-        if self.on_start:
-            self.on_start()
-
-    def _on_stop(self):
-        if self.on_stop:
-            self.on_stop()
-
-    def set_running(self, running):
-        if running:
-            self.status_dot.config(fg=COLORS["success"])
-            self.status_text.config(text="Running", fg=COLORS["success"])
-            self.start_btn.set_disabled(True)
-            self.stop_btn.set_disabled(False)
-        else:
-            self.status_dot.config(fg=COLORS["error"])
-            self.status_text.config(text="Stopped", fg=COLORS["text_dim"])
-            self.start_btn.set_disabled(False)
-            self.stop_btn.set_disabled(True)
-            # Clear progress
-            self.set_progress(0, "", "")
-
-    def set_progress(self, percent, code, step):
-        """Update progress bar and labels."""
-        # Update progress bar
-        self.progress_canvas.delete("all")
-        width = self.progress_canvas.winfo_width()
-        if width > 1:
-            # Background
-            self.progress_canvas.create_rectangle(0, 0, width, 8,
-                                                  fill=COLORS["bg_dark"], outline="")
-            # Fill
-            fill_width = int(width * percent / 100)
-            if fill_width > 0:
-                self.progress_canvas.create_rectangle(0, 0, fill_width, 8,
-                                                      fill=self.color, outline="")
-
-        # Update labels
-        if code and step:
-            self.progress_label.config(text=f"{code}: {step}")
-            self.percent_label.config(text=f"{percent}%")
-        else:
-            self.progress_label.config(text="")
-            self.percent_label.config(text="")
 
 
 # ============================================================================
@@ -462,10 +324,13 @@ class VE3ToolGUI:
         self.thumb_running = False
         self.edit_running = False
         self.auto_mode = False  # Auto mode runs all continuously
-        self.parallel_var = tk.StringVar(value="4")  # Default parallel count
+        self.parallel_var = tk.StringVar(value="auto")  # Default: auto-detect based on hardware
 
         # Smart queue tracker
         self.queue_tracker = QueueTracker()
+
+        # Track failed codes from edit output
+        self.failed_codes = {}  # code -> fail_count
 
         # Handle window close
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -490,533 +355,520 @@ class VE3ToolGUI:
         self.root.destroy()
 
     def create_ui(self):
+        self.current_tab = "edit_queue"
+
         main = tk.Frame(self.root, bg=COLORS["bg_dark"])
         main.pack(fill=tk.BOTH, expand=True, padx=20, pady=15)
 
         self.create_header(main)
-        self.create_progress_bar(main)
-        self.create_code_list(main)
+        self.create_process_bar(main)
+        self.create_pipeline_panel(main)
+        self.create_queue_tabs(main)
         self.create_log_area(main)
 
     def create_header(self, parent):
-        """Header với Auto button và Settings."""
+        """Header with Auto button, Parallel selector, Settings."""
         header = tk.Frame(parent, bg=COLORS["bg_dark"])
-        header.pack(fill=tk.X, pady=(0, 15))
+        header.pack(fill=tk.X, pady=(0, 10))
 
-        # Title
-        tk.Label(header, text="⚡ VE3 Tool", font=("Segoe UI", 18, "bold"),
+        tk.Label(header, text="VE3 Tool", font=("Segoe UI", 16, "bold"),
                 bg=COLORS["bg_dark"], fg=COLORS["text"]).pack(side=tk.LEFT)
 
-        # Settings button
-        settings_btn = tk.Button(header, text="⚙ Cài đặt", font=("Segoe UI", 10),
+        # Settings
+        settings_btn = tk.Button(header, text="Cai dat", font=("Segoe UI", 9),
                                 command=self.open_subtitle_settings,
                                 bg=COLORS["bg_card"], fg=COLORS["text"],
-                                relief=tk.FLAT, cursor="hand2", padx=12, pady=5)
-        settings_btn.pack(side=tk.RIGHT, padx=(10, 0))
+                                relief=tk.FLAT, cursor="hand2", padx=8, pady=3)
+        settings_btn.pack(side=tk.RIGHT, padx=(5, 0))
 
-        # Refresh button
-        refresh_btn = tk.Button(header, text="🔄", font=("Segoe UI", 12),
-                               command=self.refresh_all,
-                               bg=COLORS["bg_dark"], fg=COLORS["text_dim"],
-                               relief=tk.FLAT, cursor="hand2", padx=8)
-        refresh_btn.pack(side=tk.RIGHT)
+        # Parallel selector
+        par_frame = tk.Frame(header, bg=COLORS["bg_dark"])
+        par_frame.pack(side=tk.RIGHT, padx=(0, 8))
+        tk.Label(par_frame, text="Parallel:", font=("Segoe UI", 9),
+                bg=COLORS["bg_dark"], fg=COLORS["text_dim"]).pack(side=tk.LEFT)
+        ttk.Combobox(par_frame, textvariable=self.parallel_var,
+                     values=["auto", "1", "2", "3", "4", "6", "8"],
+                     width=5, state="readonly").pack(side=tk.LEFT, padx=(3, 0))
 
-        # Auto mode button
-        self.auto_btn = ModernButton(header, "▶ Chạy Auto", self.toggle_auto_mode,
-                                    COLORS["accent_green"], width=110, height=36)
-        self.auto_btn.pack(side=tk.RIGHT, padx=(0, 10))
+        # Auto button
+        self.auto_btn = ModernButton(header, "Chay Auto", self.toggle_auto_mode,
+                                    COLORS["accent_green"], width=100, height=32)
+        self.auto_btn.pack(side=tk.RIGHT, padx=(0, 8))
 
-    def create_progress_bar(self, parent):
-        """Progress bar lớn và rõ ràng khi đang xử lý."""
-        self.progress_frame = tk.Frame(parent, bg=COLORS["accent_blue"],
-                                       highlightbackground=COLORS["accent_blue"], highlightthickness=2)
-        self.progress_frame.pack(fill=tk.X, pady=(0, 15))
-        self.progress_frame.pack_forget()  # Ẩn khi không chạy
+    # ================================================================
+    # PROCESS BAR - compact status indicators + controls
+    # ================================================================
 
-        inner = tk.Frame(self.progress_frame, bg=COLORS["bg_card"])
-        inner.pack(fill=tk.BOTH, padx=2, pady=2)
+    def create_process_bar(self, parent):
+        """Compact process status bar with indicators and start/stop."""
+        bar = tk.Frame(parent, bg=COLORS["bg_card"],
+                       highlightbackground=COLORS["border"], highlightthickness=1)
+        bar.pack(fill=tk.X, pady=(0, 8))
+        inner = tk.Frame(bar, bg=COLORS["bg_card"])
+        inner.pack(fill=tk.X, padx=10, pady=5)
 
-        # Row 1: Code và phần trăm (lớn)
-        row1 = tk.Frame(inner, bg=COLORS["bg_card"])
-        row1.pack(fill=tk.X, padx=15, pady=(12, 5))
+        self.srt_proc = self._make_proc_indicator(inner, "SRT", COLORS["accent_purple"],
+                                                   self.start_srt, self.stop_srt)
+        tk.Label(inner, text="│", bg=COLORS["bg_card"], fg=COLORS["border"],
+                 font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=8)
+        self.thumb_proc = self._make_proc_indicator(inner, "Thumb/NV", COLORS["accent_orange"],
+                                                     self.start_thumb, self.stop_thumb)
+        tk.Label(inner, text="│", bg=COLORS["bg_card"], fg=COLORS["border"],
+                 font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=8)
+        self.edit_proc = self._make_proc_indicator(inner, "Edit", COLORS["accent_blue"],
+                                                    self.start_edit, self.stop_edit)
 
-        self.progress_code_label = tk.Label(row1, text="", font=("Segoe UI", 16, "bold"),
-                                           bg=COLORS["bg_card"], fg=COLORS["accent_blue"])
-        self.progress_code_label.pack(side=tk.LEFT)
+    def _make_proc_indicator(self, parent, name, color, on_start, on_stop):
+        """Create one process indicator: ● Name info [▶][■]"""
+        f = tk.Frame(parent, bg=COLORS["bg_card"])
+        f.pack(side=tk.LEFT)
 
-        self.progress_percent_label = tk.Label(row1, text="", font=("Segoe UI", 18, "bold"),
-                                              bg=COLORS["bg_card"], fg=COLORS["success"])
-        self.progress_percent_label.pack(side=tk.RIGHT)
+        dot = tk.Label(f, text="●", font=("Segoe UI", 11),
+                       bg=COLORS["bg_card"], fg=COLORS["text_dim"])
+        dot.pack(side=tk.LEFT)
 
-        # Row 2: Step chi tiết
-        self.progress_step_label = tk.Label(inner, text="", font=("Segoe UI", 11),
-                                           bg=COLORS["bg_card"], fg=COLORS["text_dim"])
-        self.progress_step_label.pack(fill=tk.X, padx=15, pady=(0, 8))
+        lbl = tk.Label(f, text=name, font=("Segoe UI", 9, "bold"),
+                       bg=COLORS["bg_card"], fg=color)
+        lbl.pack(side=tk.LEFT, padx=(3, 0))
 
-        # Progress bar lớn hơn
-        self.progress_bar = tk.Canvas(inner, height=12, bg=COLORS["bg_dark"],
-                                     highlightthickness=0)
-        self.progress_bar.pack(fill=tk.X, padx=15, pady=(0, 12))
+        info = tk.Label(f, text="dừng", font=("Segoe UI", 8),
+                        bg=COLORS["bg_card"], fg=COLORS["text_dim"])
+        info.pack(side=tk.LEFT, padx=(5, 0))
 
-    def create_code_list(self, parent):
-        """Danh sách mã với trạng thái rõ ràng."""
-        # Container
-        list_frame = tk.Frame(parent, bg=COLORS["bg_dark"])
-        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        start_btn = ModernButton(f, "▶", on_start, color, width=28, height=22)
+        start_btn.pack(side=tk.LEFT, padx=(5, 0))
 
-        # Tạo 3 cột: Chờ VM | Chờ Edit | Hoàn thành
-        list_frame.columnconfigure(0, weight=1)
-        list_frame.columnconfigure(1, weight=1)
-        list_frame.columnconfigure(2, weight=1)
+        stop_btn = ModernButton(f, "■", on_stop, COLORS["accent_red"], width=28, height=22)
+        stop_btn.pack(side=tk.LEFT, padx=(2, 0))
+        stop_btn.set_disabled(True)
 
-        # Column 1: Chờ VM (orange)
-        self.vm_column = self._create_status_column(list_frame, 0, "📤 Chờ VM", COLORS["accent_orange"])
+        return {
+            "dot": dot, "info": info, "color": color,
+            "start_btn": start_btn, "stop_btn": stop_btn,
+        }
 
-        # Column 2: Chờ Edit (blue)
-        self.edit_column = self._create_status_column(list_frame, 1, "🎬 Chờ Edit", COLORS["accent_blue"])
+    def _set_proc_running(self, proc, running):
+        """Update process indicator visual state."""
+        if running:
+            proc["dot"].config(fg=COLORS["success"])
+            proc["info"].config(text="chạy", fg=COLORS["success"])
+            proc["start_btn"].set_disabled(True)
+            proc["stop_btn"].set_disabled(False)
+        else:
+            proc["dot"].config(fg=COLORS["text_dim"])
+            proc["info"].config(text="dừng", fg=COLORS["text_dim"])
+            proc["start_btn"].set_disabled(False)
+            proc["stop_btn"].set_disabled(True)
 
-        # Column 3: Hoàn thành (green)
-        self.done_column = self._create_status_column(list_frame, 2, "✅ Hoàn thành", COLORS["success"])
+    def _set_proc_info(self, proc, text):
+        """Update the info text of a process indicator."""
+        proc["info"].config(text=text, fg=COLORS["text"])
 
-        # Initial load
-        self.refresh_code_list()
+    # ================================================================
+    # PIPELINE PANEL - per-code full pipeline status
+    # ================================================================
 
-    def _create_status_column(self, parent, col, title, color):
-        """Tạo một cột trạng thái."""
-        frame = tk.Frame(parent, bg=COLORS["bg_card"], highlightbackground=COLORS["border"],
-                        highlightthickness=1)
-        frame.grid(row=0, column=col, sticky="nsew", padx=5)
+    def create_pipeline_panel(self, parent):
+        """Scrollable panel showing each active code's pipeline status."""
+        header = tk.Frame(parent, bg=COLORS["bg_dark"])
+        header.pack(fill=tk.X, pady=(0, 3))
+        self._pipeline_header = tk.Label(header, text="Đang xử lý",
+                                          font=("Segoe UI", 11, "bold"),
+                                          bg=COLORS["bg_dark"], fg=COLORS["text"])
+        self._pipeline_header.pack(side=tk.LEFT)
 
-        # Header
-        header = tk.Frame(frame, bg=COLORS["bg_card"])
-        header.pack(fill=tk.X, padx=10, pady=10)
+        container = tk.Frame(parent, bg=COLORS["border"])
+        container.pack(fill=tk.X, pady=(0, 8))
 
-        tk.Label(header, text=title, font=("Segoe UI", 11, "bold"),
-                bg=COLORS["bg_card"], fg=color).pack(side=tk.LEFT)
+        canvas = tk.Canvas(container, bg=COLORS["bg_card"], highlightthickness=0, height=140)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
 
-        count_label = tk.Label(header, text="0", font=("Segoe UI", 14, "bold"),
-                              bg=COLORS["bg_card"], fg=color)
-        count_label.pack(side=tk.RIGHT)
+        self._pipeline_frame = tk.Frame(canvas, bg=COLORS["bg_card"])
+        self._pipeline_frame.bind("<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=self._pipeline_frame, anchor="nw", tags="pf")
 
-        # List container with scrollbar
-        list_container = tk.Frame(frame, bg=COLORS["bg_card"])
-        list_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=(0, 5))
+        def on_resize(event):
+            canvas.itemconfig("pf", width=event.width)
+        canvas.bind("<Configure>", on_resize)
 
-        canvas = tk.Canvas(list_container, bg=COLORS["bg_card"], highlightthickness=0, height=280)
-        scrollbar = ttk.Scrollbar(list_container, orient="vertical", command=canvas.yview)
-
-        list_frame = tk.Frame(canvas, bg=COLORS["bg_card"])
-        list_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-
-        canvas.create_window((0, 0), window=list_frame, anchor="nw", width=250)
         canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1, pady=1)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._pipeline_canvas = canvas
+        self._pipeline_widgets = {}
+        self._pipeline_codes = []
+
+        tk.Label(self._pipeline_frame, text="Chưa có mã nào đang xử lý",
+                 font=("Segoe UI", 10), bg=COLORS["bg_card"],
+                 fg=COLORS["text_dim"], pady=15).pack()
+
+    def _build_pipeline_row(self, parent, code):
+        """Build widgets for one code's pipeline row."""
+        row = tk.Frame(parent, bg=COLORS["bg_card"])
+        row.pack(fill=tk.X, padx=10, pady=4)
+
+        # Line 1: code name + time
+        line1 = tk.Frame(row, bg=COLORS["bg_card"])
+        line1.pack(fill=tk.X)
+
+        name_lbl = tk.Label(line1, text=code, font=("Consolas", 11, "bold"),
+                            bg=COLORS["bg_card"], fg=COLORS["text"])
+        name_lbl.pack(side=tk.LEFT)
+
+        time_lbl = tk.Label(line1, text="", font=("Consolas", 9),
+                            bg=COLORS["bg_card"], fg=COLORS["text_dim"])
+        time_lbl.pack(side=tk.RIGHT)
+
+        # Line 2: pipeline badges → edit step + percent
+        line2 = tk.Frame(row, bg=COLORS["bg_card"])
+        line2.pack(fill=tk.X, pady=(2, 0))
+
+        srt_badge = tk.Label(line2, text="SRT ✓", font=("Segoe UI", 8, "bold"),
+                             bg=COLORS["bg_card"], fg=COLORS["success"])
+        srt_badge.pack(side=tk.LEFT)
+
+        thumb_badge = tk.Label(line2, text="Thumb ...", font=("Segoe UI", 8, "bold"),
+                               bg=COLORS["bg_card"], fg=COLORS["text_dim"])
+        thumb_badge.pack(side=tk.LEFT, padx=(6, 0))
+
+        nv_badge = tk.Label(line2, text="NV ...", font=("Segoe UI", 8, "bold"),
+                            bg=COLORS["bg_card"], fg=COLORS["text_dim"])
+        nv_badge.pack(side=tk.LEFT, padx=(6, 0))
+
+        tk.Label(line2, text="→", font=("Segoe UI", 9),
+                 bg=COLORS["bg_card"], fg=COLORS["text_dim"]).pack(side=tk.LEFT, padx=(6, 6))
+
+        step_lbl = tk.Label(line2, text="", font=("Segoe UI", 9),
+                            bg=COLORS["bg_card"], fg=COLORS["accent_blue"])
+        step_lbl.pack(side=tk.LEFT)
+
+        pct_lbl = tk.Label(line2, text="", font=("Consolas", 10, "bold"),
+                           bg=COLORS["bg_card"], fg=COLORS["text"])
+        pct_lbl.pack(side=tk.RIGHT)
+
+        # Line 3: progress bar
+        bar = tk.Canvas(row, height=6, bg=COLORS["bg_dark"], highlightthickness=0)
+        bar.pack(fill=tk.X, pady=(3, 0))
+
+        return {
+            "frame": row, "name": name_lbl, "time": time_lbl,
+            "srt_badge": srt_badge, "thumb_badge": thumb_badge, "nv_badge": nv_badge,
+            "step": step_lbl, "percent": pct_lbl, "progress_bar": bar,
+        }
+
+    def _update_pipeline(self, videos):
+        """Update pipeline panel with current video data."""
+        codes = sorted(videos.keys())
+
+        # Rebuild if codes changed
+        if codes != self._pipeline_codes:
+            self._pipeline_codes = codes
+            for w in self._pipeline_frame.winfo_children():
+                w.destroy()
+            self._pipeline_widgets = {}
+
+            if not codes:
+                tk.Label(self._pipeline_frame, text="Chưa có mã nào đang xử lý",
+                         font=("Segoe UI", 10), bg=COLORS["bg_card"],
+                         fg=COLORS["text_dim"], pady=15).pack()
+                self._pipeline_header.config(text="Đang xử lý")
+                return
+
+            for i, code in enumerate(codes):
+                if i > 0:
+                    tk.Frame(self._pipeline_frame, bg=COLORS["border"],
+                             height=1).pack(fill=tk.X, padx=5, pady=1)
+                self._pipeline_widgets[code] = self._build_pipeline_row(self._pipeline_frame, code)
+
+        self._pipeline_header.config(
+            text=f"Đang xử lý ({len(codes)} mã)" if codes else "Đang xử lý")
+
+        # Update each row
+        thumb_dir = TOOL_DIR / "thumb" / "thumbnails"
+        nv_dir = TOOL_DIR / "thumb" / "nv"
+
+        for code in codes:
+            if code not in self._pipeline_widgets:
+                continue
+            w = self._pipeline_widgets[code]
+            vid = videos.get(code, {})
+
+            # Badges
+            w["srt_badge"].config(text="SRT ✓", fg=COLORS["success"])
+
+            has_thumb = any(thumb_dir.glob(f"{code}.*")) if thumb_dir.exists() else False
+            w["thumb_badge"].config(
+                text="Thumb ✓" if has_thumb else "Thumb ...",
+                fg=COLORS["success"] if has_thumb else COLORS["text_dim"])
+
+            has_nv = (nv_dir / f"{code}.png").exists() if nv_dir.exists() else False
+            w["nv_badge"].config(
+                text="NV ✓" if has_nv else "NV ...",
+                fg=COLORS["success"] if has_nv else COLORS["text_dim"])
+
+            # Edit status
+            step = vid.get("step", "")
+            percent = vid.get("percent", 0)
+            clip_info = ""
+            if vid.get("clip_total", 0) > 0 and "clip" in step.lower():
+                clip_info = f" ({vid.get('clip_current', 0)}/{vid['clip_total']})"
+
+            fail_count = self.failed_codes.get(code, 0)
+            if fail_count >= 3:
+                w["step"].config(text=f"LỖI - đã skip ({fail_count} lần)", fg=COLORS["error"])
+                w["percent"].config(text="✗", fg=COLORS["error"])
+            elif fail_count > 0:
+                w["step"].config(text=f"Edit: {step}{clip_info} (lỗi {fail_count}/3)",
+                                 fg=COLORS["warning"])
+                w["percent"].config(text=f"{percent}%", fg=COLORS["warning"])
+            elif step.lower() == "done":
+                w["step"].config(text="Done ✓", fg=COLORS["success"])
+                w["percent"].config(text="100%", fg=COLORS["success"])
+            else:
+                w["step"].config(text=f"Edit: {step}{clip_info}", fg=COLORS["accent_blue"])
+                w["percent"].config(text=f"{percent}%", fg=COLORS["text"])
+
+            # Time (live elapsed)
+            elapsed_seconds = vid.get("elapsed_seconds", 0)
+            started_at = vid.get("started_at")
+            if started_at:
+                try:
+                    from datetime import datetime as dt
+                    start_time = dt.fromisoformat(started_at)
+                    elapsed_seconds = int((dt.now() - start_time).total_seconds())
+                except:
+                    pass
+
+            eta_seconds = vid.get("eta_seconds")
+            time_parts = [self._format_time(elapsed_seconds)]
+            if eta_seconds and eta_seconds > 0:
+                time_parts.append(f"ETA {self._format_time(eta_seconds)}")
+            w["time"].config(text="  ".join(time_parts))
+
+            # Progress bar
+            pbar = w["progress_bar"]
+            pbar.delete("all")
+            bar_w = pbar.winfo_width()
+            if bar_w > 1 and percent > 0:
+                fill_w = int(bar_w * percent / 100)
+                bar_color = COLORS["error"] if fail_count >= 3 else COLORS["accent_green"]
+                pbar.create_rectangle(0, 0, fill_w, 6, fill=bar_color, outline="")
+
+    # ================================================================
+    # QUEUE TABS - Cho Edit / Loi / Hoan thanh
+    # ================================================================
+
+    def create_queue_tabs(self, parent):
+        """Tabbed queue: Cho Edit | Loi | Hoan thanh + VM count."""
+        container = tk.Frame(parent, bg=COLORS["bg_dark"])
+        container.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        # Tab bar
+        tab_bar = tk.Frame(container, bg=COLORS["bg_dark"])
+        tab_bar.pack(fill=tk.X, pady=(0, 5))
+
+        self.tab_buttons = {}
+        tabs = [
+            ("edit_queue", "Cho Edit", COLORS["accent_blue"]),
+            ("errors", "Loi", COLORS["error"]),
+            ("done", "Hoan thanh", COLORS["success"]),
+        ]
+        for tab_id, label, color in tabs:
+            btn = tk.Label(tab_bar, text=f" {label}: 0 ", font=("Segoe UI", 10, "bold"),
+                          bg=COLORS["bg_card"], fg=color, cursor="hand2",
+                          padx=10, pady=4)
+            btn.pack(side=tk.LEFT, padx=(0, 3))
+            btn.bind("<Button-1>", lambda e, t=tab_id: self._switch_tab(t))
+            self.tab_buttons[tab_id] = btn
+
+        # VM count (compact, right side)
+        self.vm_count_label = tk.Label(tab_bar, text="", font=("Segoe UI", 9),
+                                       bg=COLORS["bg_dark"], fg=COLORS["text_dim"])
+        self.vm_count_label.pack(side=tk.RIGHT)
+
+        # Tab content area
+        content_frame = tk.Frame(container, bg=COLORS["border"])
+        content_frame.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(content_frame, bg=COLORS["bg_card"], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(content_frame, orient="vertical", command=canvas.yview)
+
+        self.tab_content_frame = tk.Frame(canvas, bg=COLORS["bg_card"])
+        self.tab_content_frame.bind("<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=self.tab_content_frame, anchor="nw",
+                            tags="content_window")
+
+        # Make content frame fill canvas width
+        def on_canvas_resize(event):
+            canvas.itemconfig("content_window", width=event.width)
+        canvas.bind("<Configure>", on_canvas_resize)
+
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1, pady=1)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         # Mouse wheel
         def on_mousewheel(event):
             canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        canvas.bind("<MouseWheel>", on_mousewheel)
-        list_frame.bind("<MouseWheel>", on_mousewheel)
-
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        return {"frame": list_frame, "count": count_label, "canvas": canvas, "color": color}
-
-    def refresh_code_list(self):
-        """Refresh danh sách mã theo trạng thái."""
-        # Get all codes
-        all_codes = self.queue_tracker.get_all_codes()
-
-        # Read current progress to mark in-progress items
-        current_code = ""
-        current_step = ""
-        current_percent = 0
-        try:
-            if PROGRESS_FILE.exists():
-                with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
-                    progress = json.load(f)
-                current_code = progress.get("code", "")
-                current_step = progress.get("step", "")
-                current_percent = progress.get("percent", 0)
-                clip_current = progress.get("clip_current", 0)
-                clip_total = progress.get("clip_total", 0)
-        except:
-            pass
-
-        # Update in-progress item
-        if current_code and current_code in all_codes:
-            if current_step and current_percent > 0:
-                all_codes[current_code]["status"] = "editing"
-                # Show detailed progress
-                if clip_total > 0:
-                    all_codes[current_code]["status_text"] = f"{current_step} {clip_current}/{clip_total} ({current_percent}%)"
-                else:
-                    all_codes[current_code]["status_text"] = f"{current_step} ({current_percent}%)"
-                all_codes[current_code]["icon"] = "⏳"
-                all_codes[current_code]["color"] = COLORS["warning"]
-
-        # Clear all columns
-        for col in [self.vm_column, self.edit_column, self.done_column]:
-            for widget in col["frame"].winfo_children():
-                widget.destroy()
-
-        # Categorize codes
-        vm_codes = []      # voice, srt_done, waiting_vm
-        edit_codes = []    # visual_ready, editing
-        done_codes = []    # done
-
-        for code, data in all_codes.items():
-            status = data.get("status", "")
-            if status in ["voice", "srt_done", "waiting_vm"]:
-                vm_codes.append((code, data))
-            elif status in ["visual_ready", "editing"]:
-                edit_codes.append((code, data))
-            elif status == "done":
-                done_codes.append((code, data))
-
-        # Sort edit_codes: editing first, then visual_ready
-        edit_codes.sort(key=lambda x: (0 if x[1].get("status") == "editing" else 1, x[0]))
-
-        # Sort done by mtime (newest first)
-        done_codes.sort(key=lambda x: -x[1].get("mtime", 0))
-
-        # Populate columns
-        self._populate_column(self.vm_column, vm_codes)
-        self._populate_column(self.edit_column, edit_codes)
-        self._populate_column(self.done_column, done_codes[:20])  # Max 20 done items
-
-        # Update counts
-        self.vm_column["count"].config(text=str(len(vm_codes)))
-        self.edit_column["count"].config(text=str(len(edit_codes)))
-        self.done_column["count"].config(text=str(len(done_codes)))
-
-    def _populate_column(self, column, items):
-        """Populate a column with code items."""
-        frame = column["frame"]
-        color = column["color"]
-
-        for code, data in items:
-            is_editing = data.get("status") == "editing"
-            bg_color = COLORS["accent_blue"] if is_editing else COLORS["bg_card"]
-            text_color = "#ffffff" if is_editing else COLORS["text"]
-
-            item = tk.Frame(frame, bg=bg_color)
-            item.pack(fill=tk.X, pady=2)
-
-            # Status icon
-            icon = data.get("icon", "●")
-            tk.Label(item, text=icon, font=("Segoe UI", 10),
-                    bg=bg_color, fg="#ffffff" if is_editing else color).pack(side=tk.LEFT, padx=(5, 5))
-
-            # Code name (bold if editing)
-            font_style = ("Segoe UI", 11, "bold") if is_editing else ("Segoe UI", 10)
-            code_label = tk.Label(item, text=code, font=font_style,
-                                 bg=bg_color, fg=text_color)
-            code_label.pack(side=tk.LEFT)
-
-            # Status text (smaller)
-            status_text = data.get("status_text", "")
-            if status_text and "Hoàn thành" not in status_text:
-                tk.Label(item, text=f"• {status_text}", font=("Segoe UI", 8),
-                        bg=bg_color, fg="#cccccc" if is_editing else COLORS["text_dim"]).pack(side=tk.LEFT, padx=(5, 0))
-
-            # For done items: show file icons and click to open folder
-            if data.get("status") == "done":
-                video_path = data.get("path")
-                done_folder = video_path.parent if video_path else None
-
-                # Check what files exist
-                thumb_dir = TOOL_DIR / "thumb" / "thumbnails"
-                has_thumb = any(thumb_dir.glob(f"{code}.*")) if thumb_dir.exists() else False
-                has_video = video_path and video_path.exists()
-                has_srt = done_folder and any(done_folder.glob("*.srt")) if done_folder else False
-
-                # Show file icons
-                icons_text = ""
-                if has_thumb:
-                    icons_text += "🖼"
-                if has_video:
-                    icons_text += "🎬"
-                if has_srt:
-                    icons_text += "📝"
-
-                if icons_text:
-                    tk.Label(item, text=icons_text, font=("Segoe UI", 8),
-                            bg=COLORS["bg_card"], fg=COLORS["text_dim"]).pack(side=tk.RIGHT, padx=(0, 5))
-
-                # Click to open folder, double-click to play video
-                item.config(cursor="hand2")
-                code_label.config(cursor="hand2")
-
-                if done_folder:
-                    item.bind("<Button-1>", lambda e, p=done_folder: os.startfile(str(p)))
-                    code_label.bind("<Button-1>", lambda e, p=done_folder: os.startfile(str(p)))
-                if video_path:
-                    item.bind("<Double-Button-1>", lambda e, p=video_path: self.play_video(p))
-                    code_label.bind("<Double-Button-1>", lambda e, p=video_path: self.play_video(p))
-
-                item.bind("<Enter>", lambda e, f=item: f.configure(bg=COLORS["bg_card_hover"]))
-                item.bind("<Leave>", lambda e, f=item: f.configure(bg=COLORS["bg_card"]))
-
-    def refresh_all(self):
-        """Refresh cả danh sách và stats."""
-        self.refresh_code_list()
-        self.log("Đã làm mới", "info")
-
-    def create_status_bar(self, parent):
-        """Compact status bar showing current processing state."""
-        status_frame = tk.Frame(parent, bg=COLORS["bg_card"],
-                               highlightbackground=COLORS["border"], highlightthickness=1)
-        status_frame.pack(fill=tk.X, pady=(0, 15))
-
-        inner = tk.Frame(status_frame, bg=COLORS["bg_card"])
-        inner.pack(fill=tk.X, padx=15, pady=10)
-
-        # SRT status
-        srt_frame = tk.Frame(inner, bg=COLORS["bg_card"])
-        srt_frame.pack(side=tk.LEFT, padx=(0, 20))
-
-        self.srt_status_dot = tk.Label(srt_frame, text="●", font=("Segoe UI", 10),
-                                       bg=COLORS["bg_card"], fg=COLORS["text_dim"])
-        self.srt_status_dot.pack(side=tk.LEFT)
-        tk.Label(srt_frame, text="SRT", font=("Segoe UI", 10),
-                bg=COLORS["bg_card"], fg=COLORS["text"]).pack(side=tk.LEFT, padx=(5, 0))
-
-        # Edit status
-        edit_frame = tk.Frame(inner, bg=COLORS["bg_card"])
-        edit_frame.pack(side=tk.LEFT, padx=(0, 20))
-
-        self.edit_status_dot = tk.Label(edit_frame, text="●", font=("Segoe UI", 10),
-                                        bg=COLORS["bg_card"], fg=COLORS["text_dim"])
-        self.edit_status_dot.pack(side=tk.LEFT)
-        tk.Label(edit_frame, text="Edit", font=("Segoe UI", 10),
-                bg=COLORS["bg_card"], fg=COLORS["text"]).pack(side=tk.LEFT, padx=(5, 0))
-
-        # Parallel selector
-        parallel_frame = tk.Frame(inner, bg=COLORS["bg_card"])
-        parallel_frame.pack(side=tk.LEFT, padx=(0, 20))
-        tk.Label(parallel_frame, text="Parallel:", font=("Segoe UI", 9),
-                bg=COLORS["bg_card"], fg=COLORS["text_dim"]).pack(side=tk.LEFT)
-        self.parallel_var = tk.StringVar(value="4")
-        parallel_combo = ttk.Combobox(parallel_frame, textvariable=self.parallel_var,
-                                      values=["1", "2", "3", "4", "6", "8"], width=3, state="readonly")
-        parallel_combo.pack(side=tk.LEFT, padx=(5, 0))
-
-        # Current progress (inline in control bar)
-        self.inline_progress_frame = tk.Frame(inner, bg=COLORS["bg_card"])
-        self.inline_progress_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10, 0))
-
-        self.current_progress_label = tk.Label(self.inline_progress_frame, text="",
-                                               font=("Segoe UI", 9),
-                                               bg=COLORS["bg_card"], fg=COLORS["warning"])
-        self.current_progress_label.pack(side=tk.LEFT)
-
-    def create_quick_actions(self, parent):
-        actions = tk.Frame(parent, bg=COLORS["bg_dark"])
-        actions.pack(fill=tk.X, pady=(0, 15))
-
-        tk.Label(actions, text="Quick Actions", font=("Segoe UI", 11, "bold"),
-                bg=COLORS["bg_dark"], fg=COLORS["text"]).pack(anchor=tk.W, pady=(0, 10))
-
-        btn_row = tk.Frame(actions, bg=COLORS["bg_dark"])
-        btn_row.pack(fill=tk.X)
-
-        buttons = [
-            ("📂 VISUAL", lambda: os.startfile(VISUAL_DIR) if VISUAL_DIR.exists() else None, COLORS["bg_card_hover"]),
-            ("📂 DONE", lambda: os.startfile(DONE_DIR) if DONE_DIR.exists() else None, COLORS["bg_card_hover"]),
-            ("📂 VOICE", lambda: os.startfile(VOICE_DIR) if VOICE_DIR.exists() else None, COLORS["bg_card_hover"]),
-            ("⚙ Template", self.open_subtitle_settings, COLORS["accent_orange"]),
-            ("⬆ Upload", self.upload_github, COLORS["accent_purple"]),
-        ]
-
-        for text, cmd, color in buttons:
-            btn = ModernButton(btn_row, text, cmd, color, width=95, height=32)
-            btn.pack(side=tk.LEFT, padx=(0, 8))
-
-    def create_processing_queue(self, parent):
-        """Create processing queue showing pending/in-progress/completed items."""
-        queue_frame = tk.Frame(parent, bg=COLORS["bg_dark"])
-        queue_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
-
-        # Header
-        header = tk.Frame(queue_frame, bg=COLORS["bg_dark"])
-        header.pack(fill=tk.X, pady=(0, 5))
-
-        tk.Label(header, text="📋 Trạng thái mã", font=("Segoe UI", 11, "bold"),
-                bg=COLORS["bg_dark"], fg=COLORS["text"]).pack(side=tk.LEFT)
-
-        # Legend
-        legend = tk.Label(header, text="🎤SRT  📤VM copy  🖼️VM ảnh  🎬Edit  ✅Done",
-                         font=("Segoe UI", 8), bg=COLORS["bg_dark"], fg=COLORS["text_dim"])
-        legend.pack(side=tk.LEFT, padx=(15, 0))
-
-        refresh_btn = tk.Label(header, text="Refresh", font=("Segoe UI", 9),
-                              bg=COLORS["bg_dark"], fg=COLORS["accent_blue"], cursor="hand2")
-        refresh_btn.pack(side=tk.RIGHT)
-        refresh_btn.bind("<Button-1>", lambda e: self.refresh_queue())
-
-        # List container
-        list_container = tk.Frame(queue_frame, bg=COLORS["border"])
-        list_container.pack(fill=tk.BOTH, expand=True)
-
-        # Canvas with scrollbar for the list
-        canvas = tk.Canvas(list_container, bg=COLORS["bg_card"], highlightthickness=0, height=180)
-        scrollbar = ttk.Scrollbar(list_container, orient="vertical", command=canvas.yview)
-
-        self.queue_list_frame = tk.Frame(canvas, bg=COLORS["bg_card"])
-
-        self.queue_list_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-
-        canvas.create_window((0, 0), window=self.queue_list_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        # Mouse wheel scrolling
-        def on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-
         canvas.bind_all("<MouseWheel>", on_mousewheel)
 
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1, pady=1)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self._tab_canvas = canvas
+        self._switch_tab("edit_queue")
 
-        self.queue_canvas = canvas
-        self.refresh_queue()
+    def _switch_tab(self, tab_id):
+        """Switch active tab."""
+        self.current_tab = tab_id
+        # Update tab button styling
+        for tid, btn in self.tab_buttons.items():
+            if tid == tab_id:
+                btn.config(bg=COLORS["accent_blue"] if tid == "edit_queue"
+                          else COLORS["error"] if tid == "errors"
+                          else COLORS["success"],
+                          fg="#ffffff")
+            else:
+                btn.config(bg=COLORS["bg_card"], fg=COLORS["text_dim"])
+        self._render_tab_content()
 
-    def refresh_queue(self):
-        """Refresh the processing queue list with smart state tracking."""
-        # Clear existing items
-        for widget in self.queue_list_frame.winfo_children():
-            widget.destroy()
+    def _render_tab_content(self):
+        """Populate the active tab with items."""
+        for w in self.tab_content_frame.winfo_children():
+            w.destroy()
 
-        # Get all codes with smart state detection
         all_codes = self.queue_tracker.get_all_codes()
 
-        # Read current progress to mark in-progress items
-        current_code = ""
-        current_step = ""
-        current_percent = 0
-        try:
-            if PROGRESS_FILE.exists():
-                with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
-                    progress = json.load(f)
-                current_code = progress.get("code", "")
-                current_step = progress.get("step", "")
-                current_percent = progress.get("percent", 0)
-        except:
-            pass
+        if self.current_tab == "edit_queue":
+            items = [(c, d) for c, d in all_codes.items()
+                     if d["status"] in ("visual_ready", "editing")]
+            items.sort(key=lambda x: (0 if x[1]["status"] == "editing" else 1, x[0]))
 
-        # Update in-progress item
-        if current_code and current_code in all_codes:
-            if current_step and current_percent > 0:
-                all_codes[current_code]["status"] = "editing"
-                all_codes[current_code]["status_text"] = f"{current_step} ({current_percent}%)"
-                all_codes[current_code]["icon"] = "⏳"
-                all_codes[current_code]["color"] = COLORS["warning"]
+            if not items:
+                tk.Label(self.tab_content_frame, text="Khong co ma nao cho edit",
+                        font=("Segoe UI", 10), bg=COLORS["bg_card"],
+                        fg=COLORS["text_dim"], pady=20).pack()
+            else:
+                for code, data in items:
+                    # Override with failed status if applicable
+                    fail_count = self.failed_codes.get(code, 0)
+                    if fail_count >= 3:
+                        data = dict(data, icon="X", status_text="LOI - Excel/data hong",
+                                   color=COLORS["error"])
+                    elif fail_count > 0:
+                        data = dict(data, icon="!", status_text=f"Loi (thu lai {fail_count}/3)",
+                                   color=COLORS["warning"])
+                    self._render_queue_item(code, data)
 
-        # Sort by status priority and then by code
-        status_priority = {
-            "editing": 0,      # Đang xử lý - cao nhất
-            "voice": 1,        # Chờ SRT
-            "srt_done": 2,     # Chờ VM copy
-            "waiting_vm": 3,   # Chờ VM tạo ảnh
-            "visual_ready": 4, # Chờ Edit
-            "done": 5          # Hoàn thành - thấp nhất
-        }
+        elif self.current_tab == "errors":
+            error_items = [(c, d) for c, d in all_codes.items()
+                          if c in self.failed_codes]
+            if not error_items:
+                tk.Label(self.tab_content_frame, text="Khong co loi",
+                        font=("Segoe UI", 10), bg=COLORS["bg_card"],
+                        fg=COLORS["success"], pady=20).pack()
+            else:
+                for code, data in error_items:
+                    fail_count = self.failed_codes.get(code, 0)
+                    if fail_count >= 3:
+                        data = dict(data, icon="X", status_text="LOI - Excel/data hong, da skip",
+                                   color=COLORS["error"])
+                    else:
+                        data = dict(data, icon="!", status_text=f"Loi (thu lai {fail_count}/3)",
+                                   color=COLORS["warning"])
+                    self._render_queue_item(code, data)
 
-        queue_items = []
-        for code, data in all_codes.items():
-            item = {"code": code, **data}
-            queue_items.append(item)
+        elif self.current_tab == "done":
+            done_items = [(c, d) for c, d in all_codes.items() if d["status"] == "done"]
+            done_items.sort(key=lambda x: -x[1].get("mtime", 0))
+            if not done_items:
+                tk.Label(self.tab_content_frame, text="Chua co ma nao hoan thanh",
+                        font=("Segoe UI", 10), bg=COLORS["bg_card"],
+                        fg=COLORS["text_dim"], pady=20).pack()
+            else:
+                for code, data in done_items[:30]:
+                    self._render_queue_item(code, data, clickable=True)
 
-        # Sort: by priority, then by mtime (for done), then by code
-        queue_items.sort(key=lambda x: (
-            status_priority.get(x["status"], 99),
-            -x.get("mtime", 0),  # Newer done items first
-            x["code"]
-        ))
+    def _render_queue_item(self, code, data, clickable=False):
+        """Render one item in the queue tab."""
+        row = tk.Frame(self.tab_content_frame, bg=COLORS["bg_card"])
+        row.pack(fill=tk.X, padx=10, pady=1)
 
-        if not queue_items:
-            tk.Label(self.queue_list_frame, text="Không có mã nào trong hàng đợi",
-                    bg=COLORS["bg_card"], fg=COLORS["text_dim"],
-                    font=("Segoe UI", 9)).pack(pady=10)
-            return
+        is_error = data.get("color") == COLORS["error"]
+        is_editing = data.get("status") == "editing"
+        bg = COLORS["accent_blue"] if is_editing else COLORS["bg_card"]
+        fg = "#ffffff" if is_editing else COLORS["text"]
 
-        # Group by status for display
-        # Show max 30 items total
-        displayed = 0
-        max_display = 30
+        icon = data.get("icon", "●")
+        icon_color = COLORS["error"] if is_error else data.get("color", COLORS["text_dim"])
+        tk.Label(row, text=icon, font=("Segoe UI", 10), bg=bg,
+                fg=icon_color).pack(side=tk.LEFT, padx=(0, 5))
 
-        for item in queue_items:
-            if displayed >= max_display:
-                break
-            self._create_queue_item(item)
-            displayed += 1
+        font = ("Segoe UI", 10, "bold") if is_editing else ("Segoe UI", 10)
+        code_lbl = tk.Label(row, text=code, font=font, bg=bg, fg=fg)
+        code_lbl.pack(side=tk.LEFT)
 
-        # Show count summary at bottom
-        status_counts = {}
-        for item in queue_items:
-            st = item["status"]
-            status_counts[st] = status_counts.get(st, 0) + 1
+        status_text = data.get("status_text", "")
+        if status_text:
+            st_color = COLORS["error"] if is_error else COLORS["text_dim"]
+            tk.Label(row, text=status_text, font=("Segoe UI", 9),
+                    bg=bg, fg=st_color).pack(side=tk.RIGHT, padx=(0, 5))
 
-        summary_parts = []
-        if status_counts.get("voice", 0):
-            summary_parts.append(f"🎤{status_counts['voice']}")
-        if status_counts.get("srt_done", 0):
-            summary_parts.append(f"📤{status_counts['srt_done']}")
-        if status_counts.get("waiting_vm", 0):
-            summary_parts.append(f"🖼️{status_counts['waiting_vm']}")
-        if status_counts.get("visual_ready", 0):
-            summary_parts.append(f"🎬{status_counts['visual_ready']}")
-        if status_counts.get("done", 0):
-            summary_parts.append(f"✅{status_counts['done']}")
+        if clickable and data.get("path"):
+            row.config(cursor="hand2")
+            code_lbl.config(cursor="hand2")
+            path = data["path"]
+            folder = path.parent if path else None
+            if folder:
+                for w in [row, code_lbl]:
+                    w.bind("<Button-1>", lambda e, p=folder: os.startfile(str(p)))
+                    w.bind("<Enter>", lambda e, f=row: f.configure(bg=COLORS["bg_card_hover"]))
+                    w.bind("<Leave>", lambda e, f=row: f.configure(bg=COLORS["bg_card"]))
 
-        if summary_parts and len(queue_items) > 5:
-            summary_frame = tk.Frame(self.queue_list_frame, bg=COLORS["bg_card"])
-            summary_frame.pack(fill=tk.X, padx=10, pady=(5, 2))
-            tk.Label(summary_frame, text=" | ".join(summary_parts),
-                    font=("Segoe UI", 8), bg=COLORS["bg_card"],
-                    fg=COLORS["text_dim"]).pack(side=tk.RIGHT)
+    def refresh_code_list(self):
+        """Refresh queue tabs and counts."""
+        all_codes = self.queue_tracker.get_all_codes()
 
-    def _create_queue_item(self, item):
-        """Create a queue item row."""
-        item_frame = tk.Frame(self.queue_list_frame, bg=COLORS["bg_card"])
-        item_frame.pack(fill=tk.X, padx=10, pady=2)
+        # Count by category
+        edit_count = sum(1 for d in all_codes.values() if d["status"] in ("visual_ready", "editing"))
+        error_count = len(self.failed_codes)
+        done_count = sum(1 for d in all_codes.values() if d["status"] == "done")
+        vm_count = sum(1 for d in all_codes.values()
+                      if d["status"] in ("voice", "srt_done", "waiting_vm"))
 
-        # Get icon from item or use default
-        icon = item.get("icon", "●")
+        # Update tab buttons with counts
+        self.tab_buttons["edit_queue"].config(text=f" Cho Edit: {edit_count} ")
+        self.tab_buttons["errors"].config(text=f" Loi: {error_count} ")
+        self.tab_buttons["done"].config(text=f" Hoan thanh: {done_count} ")
 
-        # Code
-        code_label = tk.Label(item_frame, text=f"{icon} {item['code']}",
-                             font=("Segoe UI", 10), bg=COLORS["bg_card"],
-                             fg=item["color"])
-        code_label.pack(side=tk.LEFT)
+        # Show/hide error tab highlight
+        if error_count > 0:
+            self.tab_buttons["errors"].config(fg=COLORS["error"])
+        else:
+            self.tab_buttons["errors"].config(fg=COLORS["text_dim"])
 
-        # Status text
-        status_label = tk.Label(item_frame, text=item["status_text"],
-                               font=("Segoe UI", 9), bg=COLORS["bg_card"],
-                               fg=COLORS["text_dim"])
-        status_label.pack(side=tk.RIGHT)
+        # VM count
+        if vm_count > 0:
+            self.vm_count_label.config(text=f"{vm_count} ma cho VM")
+        else:
+            self.vm_count_label.config(text="")
 
-        # Click to play if done
-        if item["status"] == "done" and "path" in item and item["path"]:
-            item_frame.config(cursor="hand2")
-            code_label.config(cursor="hand2")
-            video_path = item["path"]
-            for widget in [item_frame, code_label]:
-                widget.bind("<Button-1>", lambda e, p=video_path: self.play_video(p))
-                widget.bind("<Enter>", lambda e, f=item_frame: f.configure(bg=COLORS["bg_card_hover"]))
-                widget.bind("<Leave>", lambda e, f=item_frame: f.configure(bg=COLORS["bg_card"]))
+        # Re-render current tab
+        self._render_tab_content()
+
+    def refresh_all(self):
+        self.refresh_code_list()
+        self.log("Da lam moi", "info")
 
     def play_video(self, video_path):
-        """Play video file."""
         try:
             os.startfile(str(video_path))
             self.log(f"Playing: {video_path.name}", "info")
         except Exception as e:
             self.log(f"Cannot play video: {e}", "error")
+
+    # show_progress/hide_progress removed - handled by pipeline panel
+
 
     def create_log_area(self, parent):
         log_frame = tk.Frame(parent, bg=COLORS["bg_dark"])
@@ -1068,74 +920,73 @@ class VE3ToolGUI:
         self.log("Log cleared", "info")
 
     def update_progress(self):
-        """Read progress file and update progress bar."""
+        """Read progress file and update pipeline panel."""
         try:
             if PROGRESS_FILE.exists() and self.edit_running:
                 with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
                     progress = json.load(f)
 
-                code = progress.get("code", "")
-                step = progress.get("step", "")
-                percent = progress.get("percent", 0)
-                clip_current = progress.get("clip_current", 0)
-                clip_total = progress.get("clip_total", 0)
+                videos = progress.get("videos", {})
 
-                # Add clip info to step if creating clips
-                if clip_total > 0 and "clip" in step.lower():
-                    step = f"{step} ({clip_current}/{clip_total})"
+                # Support old flat format (single video)
+                if "code" in progress and "step" in progress:
+                    videos = {progress["code"]: progress}
 
-                # Update progress bar
-                self.show_progress(code, step, percent)
+                # Update pipeline panel with per-code data
+                self._update_pipeline(videos)
 
-                # Track current code to detect changes
-                if not hasattr(self, '_last_progress_code'):
-                    self._last_progress_code = ""
+                # Update process bar info with count
+                if videos:
+                    self._set_proc_info(self.edit_proc, f"chạy ({len(videos)} mã)")
+
+                # Update window title from most advanced video
+                best = None
+                for vid_code, vid in videos.items():
+                    step = vid.get("step", "")
+                    if not step:
+                        continue
+                    if best is None or (vid.get("percent", 0) > best.get("percent", 0)
+                                        and step.lower() != "done"):
+                        best = vid
+
+                if best:
+                    code = best.get("code", "")
+                    percent = best.get("percent", 0)
+                    eta_seconds = best.get("eta_seconds")
+                    if eta_seconds and eta_seconds > 0:
+                        self.root.title(f"VE3 Tool - {code} {percent}% (ETA {self._format_time(eta_seconds)})")
+                    else:
+                        self.root.title(f"VE3 Tool - {percent}%")
+
+                # Refresh queue tabs periodically
                 if not hasattr(self, '_last_refresh_time'):
                     self._last_refresh_time = 0
-
-                # Refresh list when code changes or every 5 seconds
                 now = time.time()
-                if code != self._last_progress_code or (now - self._last_refresh_time) > 5:
-                    self._last_progress_code = code
+                if (now - self._last_refresh_time) > 5:
                     self._last_refresh_time = now
                     self.refresh_code_list()
-
-                # Also refresh when video is done
-                if step == "Done" and percent == 100:
-                    self.root.after(1000, self.refresh_code_list)
             else:
-                # Hide progress when not running
                 if not self.edit_running:
-                    self.hide_progress()
-        except:
-            pass
+                    self._update_pipeline({})
+                    self.root.title("VE3 Tool")
+        except Exception as e:
+            print(f"[GUI] update_progress error: {e}")
 
-        # Refresh every 1000ms (giảm CPU)
         self.root.after(1000, self.update_progress)
 
-    def show_progress(self, code, step, percent):
-        """Show and update progress bar."""
-        if code and step:
-            self.progress_frame.pack(fill=tk.X, pady=(0, 15), before=self.vm_column["frame"].master.master)
-            self.progress_code_label.config(text=f"⚡ ĐANG XỬ LÝ: {code}")
-            self.progress_step_label.config(text=f"📊 {step}")
-            self.progress_percent_label.config(text=f"{percent}%")
+    def _format_time(self, seconds, always_hours=False):
+        """Format seconds to HH:MM:SS."""
+        if seconds is None or seconds < 0:
+            return "--:--:--" if always_hours else "--:--"
+        seconds = int(seconds)
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        secs = seconds % 60
+        if always_hours or hours > 0:
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+        else:
+            return f"{minutes:02d}:{secs:02d}"
 
-            # Update progress bar (height=12)
-            self.progress_bar.delete("all")
-            width = self.progress_bar.winfo_width()
-            if width > 1:
-                fill_width = int(width * percent / 100)
-                if fill_width > 0:
-                    self.progress_bar.create_rectangle(0, 0, fill_width, 12,
-                                                      fill=COLORS["accent_green"], outline="")
-
-    def hide_progress(self):
-        """Hide progress bar."""
-        try:
-            self.progress_frame.pack_forget()
-        except:
-            pass
 
     def refresh_stats(self):
         """Refresh stats và code list."""
@@ -1151,6 +1002,7 @@ class VE3ToolGUI:
             self.auto_btn.color = COLORS["accent_green"]
             self.auto_btn._draw(COLORS["accent_green"])
             self.log("Auto mode stopped", "warning")
+            self.root.title("VE3 Tool")
             # Stop all processes
             self.stop_srt()
             self.stop_thumb()
@@ -1161,6 +1013,7 @@ class VE3ToolGUI:
             self.auto_btn.text = "■ Stop"
             self.auto_btn.color = COLORS["accent_red"]
             self.auto_btn._draw(COLORS["accent_red"])
+            self.root.title("VE3 Tool - Auto Running")
             self.log("Auto mode started - SRT → Thumb/NV → Edit", "success")
             # Start all processes
             if not self.srt_running:
@@ -1170,12 +1023,14 @@ class VE3ToolGUI:
             if not self.edit_running:
                 self.start_edit()
 
+
     def start_srt(self):
         if self.srt_running:
             return
 
         self.log("Starting SRT Generator...", "info")
         self.srt_running = True
+        self._set_proc_running(self.srt_proc, True)
 
         def run():
             try:
@@ -1206,7 +1061,8 @@ class VE3ToolGUI:
                         level = "success" if "Done" in line or "OK" in line else "info"
                         if "Error" in line or "ERROR" in line:
                             level = "error"
-                        self.root.after(0, lambda l=line, lv=level: self.log(f"[SRT] {l}", lv))
+                        # Parse code from SRT output to show in status
+                        self.root.after(0, lambda l=line, lv=level: self._on_srt_line(l, lv))
 
             except Exception as e:
                 self.root.after(0, lambda: self.log(f"[SRT] Error: {e}", "error"))
@@ -1215,6 +1071,16 @@ class VE3ToolGUI:
 
         threading.Thread(target=run, daemon=True).start()
 
+    def _on_srt_line(self, line, level):
+        """Process SRT output line - log and update status with current code."""
+        self.log(f"[SRT] {line}", level)
+        # Try to detect code from line (e.g. "Processing KA1-0001" or "[KA1-0001]")
+        import re
+        m = re.search(r'(KA\d+-\d+)', line)
+        if m:
+            code = m.group(1)
+            self._set_proc_info(self.srt_proc, f"> {code}")
+
     def stop_srt(self):
         if self.srt_process:
             self.log("Stopping SRT Generator...", "warning")
@@ -1222,6 +1088,7 @@ class VE3ToolGUI:
 
     def _on_srt_stopped(self):
         self.srt_running = False
+        self._set_proc_running(self.srt_proc, False)
         self.log("SRT Generator stopped", "warning")
         self.refresh_code_list()
         # Restart if auto mode is on
@@ -1235,6 +1102,7 @@ class VE3ToolGUI:
 
         self.log("Starting Thumb/NV Generator...", "info")
         self.thumb_running = True
+        self._set_proc_running(self.thumb_proc, True)
 
         def run():
             try:
@@ -1264,7 +1132,7 @@ class VE3ToolGUI:
                         level = "success" if "[OK]" in line or "Done" in line else "info"
                         if "[ERR]" in line or "Error" in line:
                             level = "error"
-                        self.root.after(0, lambda l=line, lv=level: self.log(f"[THUMB] {l}", lv))
+                        self.root.after(0, lambda l=line, lv=level: self._on_thumb_line(l, lv))
 
             except Exception as e:
                 self.root.after(0, lambda: self.log(f"[THUMB] Error: {e}", "error"))
@@ -1278,8 +1146,18 @@ class VE3ToolGUI:
             self.log("Stopping Thumb/NV Generator...", "warning")
             self.thumb_process.terminate()
 
+    def _on_thumb_line(self, line, level):
+        """Process Thumb output line - log and update status with current code."""
+        self.log(f"[THUMB] {line}", level)
+        import re
+        m = re.search(r'(KA\d+-\d+)', line)
+        if m:
+            code = m.group(1)
+            self._set_proc_info(self.thumb_proc, f"> {code}")
+
     def _on_thumb_stopped(self):
         self.thumb_running = False
+        self._set_proc_running(self.thumb_proc, False)
         self.log("Thumb/NV Generator stopped", "warning")
         self.refresh_code_list()
         # Restart if auto mode is on
@@ -1291,8 +1169,12 @@ class VE3ToolGUI:
             return
 
         parallel = self.parallel_var.get()
-        self.log(f"Starting Video Editor (parallel={parallel})...", "info")
+        if parallel == "auto":
+            self.log("Starting Video Editor (auto-detect hardware)...", "info")
+        else:
+            self.log(f"Starting Video Editor (parallel={parallel})...", "info")
         self.edit_running = True
+        self._set_proc_running(self.edit_proc, True)
 
         def run():
             try:
@@ -1304,8 +1186,13 @@ class VE3ToolGUI:
                 env = os.environ.copy()
                 env["PYTHONIOENCODING"] = "utf-8"
 
+                # Build command - don't pass --parallel if auto
+                cmd = [sys.executable, str(TOOL_DIR / "run_edit.py")]
+                if parallel != "auto":
+                    cmd.extend(["--parallel", parallel])
+
                 self.edit_process = subprocess.Popen(
-                    [sys.executable, str(TOOL_DIR / "run_edit.py"), "--parallel", parallel],
+                    cmd,
                     cwd=str(TOOL_DIR),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -1322,7 +1209,7 @@ class VE3ToolGUI:
                         level = "success" if "DONE" in line or "OK" in line else "info"
                         if "Error" in line or "ERROR" in line or "FAIL" in line:
                             level = "error"
-                        self.root.after(0, lambda l=line, lv=level: self.log(f"[EDIT] {l}", lv))
+                        self.root.after(0, lambda l=line, lv=level: self._on_edit_line(l, lv))
 
             except Exception as e:
                 self.root.after(0, lambda: self.log(f"[EDIT] Error: {e}", "error"))
@@ -1336,8 +1223,31 @@ class VE3ToolGUI:
             self.log("Stopping Video Editor...", "warning")
             self.edit_process.terminate()
 
+    def _on_edit_line(self, line, level):
+        """Process Edit output line - log, track failures, update status."""
+        self.log(f"[EDIT] {line}", level)
+        import re
+        # Detect FAILED: "KA2-0006: FAILED"
+        m = re.search(r'(KA\d+-\d+):\s*FAILED', line)
+        if m:
+            code = m.group(1)
+            self.failed_codes[code] = self.failed_codes.get(code, 0) + 1
+            self.refresh_code_list()
+        # Detect SUCCESS: "KA2-0007: SUCCESS"
+        m = re.search(r'(KA\d+-\d+):\s*SUCCESS', line)
+        if m:
+            code = m.group(1)
+            self.failed_codes.pop(code, None)
+            self.refresh_code_list()
+        # Detect SKIP: "SKIPPING from now on"
+        m = re.search(r'(KA\d+-\d+):\s*FAILED.*SKIPPING', line)
+        if m:
+            code = m.group(1)
+            self.failed_codes[code] = 99  # Permanent skip
+
     def _on_edit_stopped(self):
         self.edit_running = False
+        self._set_proc_running(self.edit_proc, False)
         self.log("Video Editor stopped", "warning")
         self.refresh_code_list()
         # Restart if auto mode is on

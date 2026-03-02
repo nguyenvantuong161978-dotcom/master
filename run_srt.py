@@ -27,6 +27,7 @@ TOOL_DIR = Path(__file__).parent
 DEFAULT_VOICE_DIR = Path("D:/AUTO/voice")
 PROJECTS_DIR = TOOL_DIR / "PROJECTS"
 DONE_DIR = Path("D:/AUTO/done")  # Check this to skip already completed codes
+VISUAL_DIR = Path("D:/AUTO/VISUAL")  # Check this to skip codes being processed by VM
 SCAN_INTERVAL = 30
 
 _print_lock = threading.Lock()
@@ -358,6 +359,11 @@ def process_voice_to_srt(voice_path: Path) -> bool:
         safe_print(f"[SRT] {name}: Already done (video in DONE folder), skipping...")
         return True
 
+    # Skip if already in VISUAL (VM has picked up and is processing)
+    if is_code_in_visual(name):
+        safe_print(f"[SRT] {name}: Already in VISUAL (being processed), skipping...")
+        return True
+
     # Paths in voice folder (where we create SRT first)
     local_srt_tmp = voice_dir / f"{name}.srt.tmp"
     local_srt = voice_dir / f"{name}.srt"
@@ -476,6 +482,12 @@ def is_code_done(code: str) -> bool:
     return False
 
 
+def is_code_in_visual(code: str) -> bool:
+    """Check if code is already in VISUAL folder (being processed by VM)."""
+    visual_dir = VISUAL_DIR / code
+    return visual_dir.exists()
+
+
 def get_pending_srt(voice_dir: Path) -> list:
     """Get voice files that need SRT or need copying to PROJECTS."""
     pending = []
@@ -487,6 +499,10 @@ def get_pending_srt(voice_dir: Path) -> list:
 
         # Skip if already done (video exists in DONE folder)
         if is_code_done(name):
+            continue
+
+        # Skip if already in VISUAL (VM has picked up and is processing)
+        if is_code_in_visual(name):
             continue
 
         # Check if SRT exists in PROJECTS
@@ -507,6 +523,9 @@ def get_pending_srt(voice_dir: Path) -> list:
             name = project_dir.name
             # Skip if already done
             if is_code_done(name):
+                continue
+            # Skip if already in VISUAL
+            if is_code_in_visual(name):
                 continue
             srt_path = project_dir / f"{name}.srt"
             if srt_path.exists():

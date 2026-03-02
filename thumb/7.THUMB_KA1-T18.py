@@ -409,22 +409,25 @@ def generate(row):
         if bbox:
             cut = cut.crop(bbox)
 
-    # --- Scale nhân vật để chiều cao = chiều cao thumbnail ---
+    # Scale theo chiều cao để nhân vật to như KA2
     orig_w, orig_h = cut.size
     scale = img_h / orig_h
     new_w = int(orig_w * scale)
     new_h = img_h
     cut = cut.resize((new_w, new_h), Image.LANCZOS)
     orig_w, orig_h = cut.size
-    px = panel_w + (right_w - orig_w) // 2
-    py = img_h - orig_h
 
-    if py < 0:
-        crop_top = -py
-        region = cut.crop((0, crop_top, orig_w, orig_h))
-        canvas.paste(region, (px, 0), region)
-    else:
-        canvas.paste(cut, (px, py), cut)
+    # Center ngang trong panel phải
+    px = panel_w + (right_w - orig_w) // 2
+    py = 0  # Top-aligned vì đã scale full height
+
+    # Nếu nhân vật rộng hơn panel, crop center để vừa
+    if orig_w > right_w:
+        crop_left = (orig_w - right_w) // 2
+        cut = cut.crop((crop_left, 0, crop_left + right_w, orig_h))
+        px = panel_w
+
+    canvas.paste(cut, (px, py), cut)
 
     dst_left   = panel_w
     dst_top    = 0

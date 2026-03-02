@@ -29,6 +29,34 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 
+# For MODNet processing
+from PIL import Image, ImageFilter
+import numpy as np
+
+# Optional dependencies for MODNet
+MODNET_OK = False
+CV2_OK = False
+REMBG_OK = False
+
+try:
+    import torch
+    from torchvision import transforms
+    MODNET_OK = True
+except ImportError:
+    pass
+
+try:
+    import cv2
+    CV2_OK = True
+except ImportError:
+    pass
+
+try:
+    from rembg import remove as rembg_remove
+    REMBG_OK = True
+except ImportError:
+    pass
+
 # ============================================================================
 # CONFIG
 # ============================================================================
@@ -64,6 +92,127 @@ def log(msg, level="INFO"):
     """Print log message."""
     timestamp = datetime.now().strftime("%H:%M:%S")
     print(f"[{timestamp}] [{level}] {msg}")
+
+
+# ============================================================================
+# MODNET PROCESSING (same as NV scripts)
+# ============================================================================
+
+_MODNET = {"model": None, "device": None}
+
+def _load_modnet():
+    """Load MODNet model (cached)."""
+    if not MODNET_OK or not CV2_OK:
+        return False
+    if _MODNET["model"] is not None:
+        return True
+
+    modnet_weight = THUMB_DIR / "MODNet" / "modnet_photographic_portrait_matting.pth"
+    modnet_src = THUMB_DIR / "MODNet" / "src"
+
+    if not modnet_weight.exists() or not modnet_src.exists():
+        return False
+
+    try:
+        sys.path.append(str(modnet_src))
+        from models.modnet import MODNet
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = MODNet(backbone_pretrained=False)
+        sd = torch.load(str(modnet_weight), map_location=device)
+        sd = {k.replace("module.", ""): v for k, v in sd.items()}
+        model.load_state_dict(sd)
+        model.to(device).eval()
+        _MODNET.update({"model": model, "device": device})
+        return True
+    except Exception as e:
+        log(f"Failed to load MODNet: {e}", "WARN")
+        return False
+
+
+def _preprocess_512(img: Image.Image):
+    """Preprocess image for MODNet (512x512)."""
+    tfm = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,))
+    ])
+    return tfm(img.convert("RGB").resize((512, 512))).unsqueeze(0)
+
+
+def process_pic_like_nv(source_path: Path, dest_path: Path) -> bool:
+    """
+    Process source image like NV scripts do:
+    1. Remove background with MODNet (or fallback to rembg)
+    2. Crop to bounding box (remove transparent padding)
+    3. Save as PNG
+    """
+    try:
+        img = Image.open(source_path)
+
+        # Check if needs background removal
+        needs_matting = img.mode in ("RGB", "BGR") or (
+            img.mode in ("RGBA", "LA") and max(img.split()[-1].getextrema()) > 250
+        )
+
+        if needs_matting:
+            # Try MODNet first
+            if _load_modnet():
+                log(f"  Using MODNet for background removal")
+                model, device = _MODNET["model"], _MODNET["device"]
+
+                # Upscale 6x for better quality (same as NV scripts)
+                img_rgb = img.convert("RGB")
+                w, h = img_rgb.size
+                big = img_rgb.resize((w * 6, h * 6), Image.LANCZOS)
+
+                with torch.no_grad():
+                    tin = _preprocess_512(big).to(device)
+                    _, _, matte = model(tin, True)
+
+                matte_np = matte[0][0].detach().cpu().numpy()
+                matte_np = cv2.resize(matte_np, big.size, interpolation=cv2.INTER_AREA)
+
+                fg = np.array(big).astype(np.uint8)
+                alpha = (np.clip(matte_np, 0, 1) * 255).astype(np.uint8)
+                img = Image.fromarray(np.dstack((fg, alpha)), "RGBA")
+
+                # Smooth and downscale
+                img = img.filter(ImageFilter.SMOOTH_MORE)
+                img = img.resize((w, h), Image.LANCZOS)
+
+                # Blur alpha for softer edges
+                r, g, b, a = img.split()
+                a = a.filter(ImageFilter.GaussianBlur(radius=3))
+                img = Image.merge("RGBA", (r, g, b, a))
+
+            elif REMBG_OK:
+                log(f"  Using rembg for background removal")
+                img = rembg_remove(img.convert("RGB"))
+                if not isinstance(img, Image.Image):
+                    img = Image.open(img)
+                img = img.convert("RGBA")
+            else:
+                log(f"  No background removal available, saving as-is", "WARN")
+                img = img.convert("RGBA")
+        else:
+            img = img.convert("RGBA")
+
+        # Crop to bounding box (remove transparent padding) - KEY STEP
+        if img.mode == "RGBA":
+            alpha = img.split()[-1]
+            bbox = alpha.getbbox()
+            if bbox:
+                img = img.crop(bbox)
+                log(f"  Cropped to bounding box: {bbox}")
+
+        # Save
+        img.save(dest_path, "PNG")
+        log(f"  Saved processed PIC: {dest_path.name}")
+        return True
+
+    except Exception as e:
+        log(f"  Error processing PIC: {e}", "ERROR")
+        return False
 
 
 # ============================================================================
@@ -305,17 +454,11 @@ def process_project(project_info, records):
     print(f"  Template: {template}")
     print(f"  Name: {name}")
 
-    # Step 1: Copy source image to thumb/pic/{code}.png
+    # Step 1: Process source image to thumb/pic/{code}.png (same as NV)
     dest_img = PIC_DIR / f"{code}.png"
     if not dest_img.exists():
-        print(f"  Copying source to pic/{code}.png")
-        # Convert to PNG if needed
-        try:
-            from PIL import Image
-            img = Image.open(source_img)
-            img.save(dest_img, "PNG")
-        except:
-            shutil.copy2(source_img, dest_img)
+        print(f"  Processing source to pic/{code}.png (MODNet + crop)")
+        process_pic_like_nv(source_img, dest_img)
 
     # Step 2: Find and run NV template script
     nv_script = find_template_script("NV", template)
