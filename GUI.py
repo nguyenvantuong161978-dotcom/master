@@ -281,6 +281,9 @@ class VE3ToolGUI:
         # Quick actions
         self.create_quick_actions(main)
 
+        # Recent completions
+        self.create_recent_completions(main)
+
         # Log area
         self.create_log_area(main)
 
@@ -374,6 +377,76 @@ class VE3ToolGUI:
             btn = ModernButton(btn_row, text, cmd, color, width=95, height=32)
             btn.pack(side=tk.LEFT, padx=(0, 8))
 
+    def create_recent_completions(self, parent):
+        """Panel hoàn thành gần đây - đọc từ timing_log.json."""
+        frame = tk.Frame(parent, bg=COLORS["bg_dark"])
+        frame.pack(fill=tk.X, pady=(0, 15))
+
+        header = tk.Frame(frame, bg=COLORS["bg_dark"])
+        header.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(header, text="✅ Hoàn thành gần đây", font=("Segoe UI", 11, "bold"),
+                 bg=COLORS["bg_dark"], fg=COLORS["text"]).pack(side=tk.LEFT)
+
+        # Container cho các dòng entry
+        self.recent_container = tk.Frame(frame, bg=COLORS["bg_dark"])
+        self.recent_container.pack(fill=tk.X)
+
+        self.refresh_recent_completions()
+
+    def refresh_recent_completions(self):
+        """Đọc timing_log.json và cập nhật panel."""
+        import json
+        # Xóa entries cũ
+        for w in self.recent_container.winfo_children():
+            w.destroy()
+
+        log_path = TOOL_DIR / "timing_log.json"
+        entries = []
+        if log_path.exists():
+            try:
+                entries = json.loads(log_path.read_text(encoding="utf-8"))
+            except Exception:
+                entries = []
+
+        # Hiển thị 5 entry gần nhất
+        recent = entries[-5:][::-1]
+
+        if not recent:
+            tk.Label(self.recent_container, text="Chưa có dữ liệu. Hoàn thành 1 video để xem.",
+                     font=("Segoe UI", 9), bg=COLORS["bg_dark"],
+                     fg=COLORS["text_dim"]).pack(anchor=tk.W)
+            return
+
+        for e in recent:
+            row = tk.Frame(self.recent_container, bg=COLORS["bg_card"])
+            row.config(highlightbackground=COLORS["border"], highlightthickness=1)
+            row.pack(fill=tk.X, pady=(0, 4))
+
+            inner = tk.Frame(row, bg=COLORS["bg_card"])
+            inner.pack(fill=tk.X, padx=12, pady=6)
+
+            s = e.get('steps_s', {})
+            total_min = s.get('total', 0) / 60
+
+            def fmt(key):
+                v = s.get(key, 0)
+                return f"{v/60:.0f}p" if v >= 60 else f"{v:.0f}s"
+
+            # Code + timestamp
+            code_ts = f"{e.get('code','?')}  •  {e.get('timestamp','')[-8:-3]}"
+            tk.Label(inner, text=code_ts, font=("Segoe UI", 10, "bold"),
+                     bg=COLORS["bg_card"], fg=COLORS["success"]).pack(side=tk.LEFT)
+
+            # Tổng thời gian
+            total_lbl = f"{total_min:.0f} phút"
+            tk.Label(inner, text=total_lbl, font=("Segoe UI", 10, "bold"),
+                     bg=COLORS["bg_card"], fg=COLORS["accent_orange"]).pack(side=tk.RIGHT, padx=(10, 0))
+
+            # Chi tiết từng bước
+            detail = f"Clip {fmt('clip_creation')}  |  Reencode {fmt('reencode')}  |  Concat {fmt('concat_xfade')}  |  Sub {fmt('subtitle_burn')}  |  NV {fmt('nv_overlay')}"
+            tk.Label(inner, text=detail, font=("Segoe UI", 8),
+                     bg=COLORS["bg_card"], fg=COLORS["text_dim"]).pack(side=tk.LEFT, padx=(15, 0))
+
     def create_log_area(self, parent):
         """Create log area."""
         log_frame = tk.Frame(parent, bg=COLORS["bg_dark"])
@@ -461,6 +534,9 @@ class VE3ToolGUI:
         self.voice_stat.set_value(voice_count)
         self.edit_stat.set_value(edit_pending)
         self.done_stat.set_value(done_count)
+
+        # Cập nhật panel hoàn thành gần đây
+        self.refresh_recent_completions()
 
         # Schedule next refresh
         self.root.after(10000, self.refresh_stats)

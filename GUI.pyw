@@ -786,7 +786,16 @@ class VE3ToolGUI:
                         font=("Segoe UI", 10), bg=COLORS["bg_card"],
                         fg=COLORS["text_dim"], pady=20).pack()
             else:
+                timing_dict = self._load_timing_dict()
                 for code, data in done_items[:30]:
+                    if code in timing_dict:
+                        steps = timing_dict[code].get("steps_s", {})
+                        total_s = steps.get("total", 0)
+                        sub_s = steps.get("subtitle_burn", 0)
+                        total_min = round(total_s / 60)
+                        sub_min = round(sub_s / 60)
+                        data = dict(data)
+                        data["status_text"] = f"✓ {total_min}p (sub {sub_min}p)"
                     self._render_queue_item(code, data, clickable=True)
 
     def _render_queue_item(self, code, data, clickable=False):
@@ -992,6 +1001,23 @@ class VE3ToolGUI:
         """Refresh stats và code list."""
         self.refresh_code_list()
         self.root.after(10000, self.refresh_stats)
+
+    def _load_timing_dict(self):
+        """Load timing_log.json as {code: latest_entry}."""
+        timing_file = TOOL_DIR / "timing_log.json"
+        if not timing_file.exists():
+            return {}
+        try:
+            with open(timing_file, "r", encoding="utf-8") as f:
+                entries = json.load(f)
+            result = {}
+            for entry in entries:
+                code = entry.get("code", "")
+                if code:
+                    result[code] = entry  # last entry wins
+            return result
+        except Exception:
+            return {}
 
     def toggle_auto_mode(self):
         """Toggle auto mode - runs SRT, Thumb/NV, and Edit continuously."""
