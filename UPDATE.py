@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Update từ GitHub - Không cần cài Git
-Tải ZIP và giải nén để cập nhật code mới nhất.
+Update từ GitHub - Không cần cài Git.
+Tải ZIP qua GitHub API (hỗ trợ private repo) và giải nén.
 """
 
 import os
@@ -10,7 +10,6 @@ import sys
 import shutil
 import zipfile
 import urllib.request
-import tempfile
 from pathlib import Path
 from datetime import datetime
 
@@ -20,193 +19,161 @@ from datetime import datetime
 
 GITHUB_REPO = "nguyenvantuong161978-dotcom/master"
 GITHUB_BRANCH = "main"
-ZIP_URL = f"https://github.com/{GITHUB_REPO}/archive/refs/heads/{GITHUB_BRANCH}.zip"
+ZIP_URL = f"https://api.github.com/repos/{GITHUB_REPO}/zipball/{GITHUB_BRANCH}"
 
-# Thư mục hiện tại
 TOOL_DIR = Path(__file__).parent
+TOKEN_FILE = TOOL_DIR / "github_token.txt"
 
-# Files cần giữ lại (không ghi đè)
-KEEP_FILES = [
-    "config/config.json",
-    "config/creds.json",
-    "config/github_token.txt",
+# Files/folders không ghi đè khi update
+SKIP_PATTERNS = [
+    "github_token.txt",
+    "progress.json",
+    "queue_tracker.json",
+    "timing_log.json",
+    "run_log.txt",
+    "thumb/creds.json",
+    "thumb/thumbnails/",
+    "thumb/assets/",
+    "_designer_uploads/",
 ]
 
-# Thư mục cần giữ lại
-KEEP_FOLDERS = [
-    "PROJECTS",
-]
+
+def get_token():
+    """Đọc GitHub token từ file."""
+    if TOKEN_FILE.exists():
+        token = TOKEN_FILE.read_text().strip()
+        if token:
+            return token
+    return None
 
 
-# ============================================================================
-# UPDATE FUNCTIONS
-# ============================================================================
+def should_skip(rel_path):
+    """Kiểm tra file có nên skip không."""
+    rel_str = str(rel_path).replace("\\", "/")
+    for pattern in SKIP_PATTERNS:
+        if pattern.endswith("/"):
+            if rel_str.startswith(pattern):
+                return True
+        else:
+            if rel_str == pattern:
+                return True
+    return False
 
-def download_zip(url, dest_path):
-    """Download ZIP file từ URL."""
-    print(f"  Downloading from GitHub...")
-    print(f"  URL: {url[:60]}...")
 
-    try:
-        urllib.request.urlretrieve(url, dest_path)
-        size_mb = os.path.getsize(dest_path) / 1024 / 1024
-        print(f"  Downloaded: {size_mb:.2f} MB")
-        return True
-    except Exception as e:
-        print(f"  [ERROR] Download failed: {e}")
+def download_and_update():
+    """Download ZIP từ GitHub API và cập nhật files."""
+    token = get_token()
+    if not token:
+        print("  [ERROR] Chưa có GitHub token!")
+        print(f"  Tạo file: {TOKEN_FILE}")
+        print("  Nội dung: GitHub Personal Access Token (classic)")
+        print("  Tạo tại: https://github.com/settings/tokens")
+        print("  Quyền cần: repo (Full control of private repositories)")
         return False
 
+    print(f"  Downloading từ GitHub...")
 
-def extract_zip(zip_path, extract_to):
-    """Giải nén ZIP file."""
-    print(f"  Extracting ZIP...")
+    # Tạo request với token
+    req = urllib.request.Request(ZIP_URL)
+    req.add_header("Authorization", f"token {token}")
+    req.add_header("Accept", "application/vnd.github+json")
+
+    import tempfile
+    temp_dir = tempfile.mkdtemp()
+    zip_path = os.path.join(temp_dir, "repo.zip")
 
     try:
+        # Download
+        with urllib.request.urlopen(req) as response:
+            with open(zip_path, 'wb') as f:
+                f.write(response.read())
+
+        size_mb = os.path.getsize(zip_path) / 1024 / 1024
+        print(f"  Downloaded: {size_mb:.2f} MB")
+
+        # Extract
+        print(f"  Extracting...")
         with zipfile.ZipFile(zip_path, 'r') as zf:
-            zf.extractall(extract_to)
+            zf.extractall(temp_dir)
 
-        # Tìm thư mục được giải nén (thường là repo-branch)
-        extracted_folders = [f for f in Path(extract_to).iterdir() if f.is_dir()]
-        if extracted_folders:
-            return extracted_folders[0]
-        return None
+        # Tìm thư mục giải nén (GitHub tạo folder repo-branch-hash)
+        extracted = [f for f in Path(temp_dir).iterdir()
+                     if f.is_dir() and f.name != "__MACOSX"]
+        if not extracted:
+            print("  [ERROR] Không tìm thấy thư mục sau giải nén!")
+            return False
+
+        src_dir = extracted[0]
+        print(f"  Source: {src_dir.name}")
+
+        # Copy files
+        copied = 0
+        skipped = 0
+        for item in src_dir.rglob("*"):
+            if item.is_file():
+                rel_path = item.relative_to(src_dir)
+
+                if should_skip(rel_path):
+                    skipped += 1
+                    continue
+
+                dst = TOOL_DIR / rel_path
+                dst.parent.mkdir(parents=True, exist_ok=True)
+
+                try:
+                    shutil.copy2(item, dst)
+                    copied += 1
+                except PermissionError:
+                    print(f"  [WARN] Không ghi được: {rel_path} (đang dùng?)")
+                except Exception as e:
+                    print(f"  [WARN] {rel_path}: {e}")
+
+        print(f"  Copied: {copied} files")
+        if skipped:
+            print(f"  Skipped: {skipped} files (giữ nguyên)")
+
+        return True
+
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            print("  [ERROR] Token không hợp lệ hoặc hết hạn!")
+            print("  Tạo token mới tại: https://github.com/settings/tokens")
+        elif e.code == 404:
+            print("  [ERROR] Không tìm thấy repo! Kiểm tra tên repo.")
+        else:
+            print(f"  [ERROR] HTTP {e.code}: {e.reason}")
+        return False
     except Exception as e:
-        print(f"  [ERROR] Extract failed: {e}")
-        return None
-
-
-def backup_keep_files():
-    """Backup các file cần giữ."""
-    backups = {}
-
-    for rel_path in KEEP_FILES:
-        src = TOOL_DIR / rel_path
-        if src.exists():
-            backups[rel_path] = src.read_bytes()
-            print(f"  Backed up: {rel_path}")
-
-    return backups
-
-
-def restore_keep_files(backups):
-    """Restore các file đã backup."""
-    for rel_path, content in backups.items():
-        dst = TOOL_DIR / rel_path
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_bytes(content)
-        print(f"  Restored: {rel_path}")
-
-
-def copy_new_files(src_dir, dst_dir):
-    """Copy files từ thư mục mới sang thư mục hiện tại."""
-    copied = 0
-    skipped = 0
-
-    for item in src_dir.rglob("*"):
-        if item.is_file():
-            rel_path = item.relative_to(src_dir)
-            rel_str = str(rel_path).replace("\\", "/")
-
-            # Skip files cần giữ
-            if rel_str in KEEP_FILES:
-                skipped += 1
-                continue
-
-            # Skip folders cần giữ
-            skip = False
-            for keep_folder in KEEP_FOLDERS:
-                if rel_str.startswith(keep_folder + "/") or rel_str == keep_folder:
-                    skip = True
-                    break
-            if skip:
-                skipped += 1
-                continue
-
-            # Copy file
-            dst = dst_dir / rel_path
-            dst.parent.mkdir(parents=True, exist_ok=True)
-
-            try:
-                shutil.copy2(item, dst)
-                copied += 1
-            except Exception as e:
-                print(f"  [WARN] Cannot copy {rel_path}: {e}")
-
-    return copied, skipped
+        print(f"  [ERROR] {e}")
+        return False
+    finally:
+        # Cleanup temp
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except:
+            pass
 
 
 def main():
     print("=" * 55)
-    print("  UPDATE FROM GITHUB (No Git Required)")
+    print("  UPDATE FROM GITHUB")
     print("=" * 55)
-    print(f"  Repo:   {GITHUB_REPO}")
-    print(f"  Branch: {GITHUB_BRANCH}")
-    print(f"  Local:  {TOOL_DIR}")
+    print(f"  Local: {TOOL_DIR}")
+    print(f"  Time:  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 55)
     print()
 
-    # Confirm
-    print("This will update all files from GitHub.")
-    print("Your config files and PROJECTS folder will be kept.")
-    print()
-    confirm = input("Continue? (y/n): ").strip().lower()
-    if confirm != 'y':
-        print("Cancelled.")
-        return
+    success = download_and_update()
 
     print()
+    if success:
+        print("=" * 55)
+        print("  UPDATE THANH CONG!")
+        print("=" * 55)
+    else:
+        print("  UPDATE THAT BAI!")
 
-    # Step 1: Backup
-    print("[1] Backing up config files...")
-    backups = backup_keep_files()
-
-    # Step 2: Download
-    print()
-    print("[2] Downloading latest version...")
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        zip_path = Path(temp_dir) / "repo.zip"
-
-        if not download_zip(ZIP_URL, zip_path):
-            print()
-            print("[ERROR] Update failed!")
-            input("\nPress Enter to exit...")
-            return
-
-        # Step 3: Extract
-        print()
-        print("[3] Extracting files...")
-        extracted_dir = extract_zip(zip_path, temp_dir)
-
-        if not extracted_dir:
-            print()
-            print("[ERROR] Extract failed!")
-            input("\nPress Enter to exit...")
-            return
-
-        print(f"  Extracted to: {extracted_dir.name}")
-
-        # Step 4: Copy files
-        print()
-        print("[4] Updating files...")
-        copied, skipped = copy_new_files(extracted_dir, TOOL_DIR)
-        print(f"  Copied: {copied} files")
-        print(f"  Skipped: {skipped} files (kept)")
-
-    # Step 5: Restore backups
-    if backups:
-        print()
-        print("[5] Restoring config files...")
-        restore_keep_files(backups)
-
-    # Done
-    print()
-    print("=" * 55)
-    print("  UPDATE COMPLETE!")
-    print(f"  Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 55)
-
-    input("\nPress Enter to exit...")
+    input("\nNhan Enter de dong...")
 
 
 if __name__ == "__main__":

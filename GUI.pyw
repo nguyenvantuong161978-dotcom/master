@@ -1288,7 +1288,7 @@ class VE3ToolGUI:
             self.root.after(3000, self.start_edit)  # Wait 3s then restart
 
     def update_from_github(self):
-        """Pull latest code from GitHub."""
+        """Update code từ GitHub - thử git pull, fallback sang ZIP download."""
         self.log("Đang cập nhật từ GitHub...", "info")
 
         def do_update():
@@ -1297,18 +1297,34 @@ class VE3ToolGUI:
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 startupinfo.wShowWindow = subprocess.SW_HIDE
 
-                result = subprocess.run(["git", "pull", "origin", "main"],
-                                        cwd=str(TOOL_DIR), capture_output=True, text=True,
-                                        startupinfo=startupinfo)
+                # Thử git pull trước (nếu có git)
+                try:
+                    result = subprocess.run(["git", "pull", "origin", "main"],
+                                            cwd=str(TOOL_DIR), capture_output=True, text=True,
+                                            startupinfo=startupinfo, timeout=60)
+                    if result.returncode == 0:
+                        output = result.stdout.strip()
+                        if "Already up to date" in output:
+                            self.root.after(0, lambda: self.log("Đã là phiên bản mới nhất.", "info"))
+                        else:
+                            self.root.after(0, lambda: self.log("Cập nhật thành công!", "success"))
+                        return
+                except (FileNotFoundError, Exception):
+                    pass  # Git không có → dùng UPDATE.py
 
-                if result.returncode == 0:
-                    output = result.stdout.strip()
-                    if "Already up to date" in output:
-                        self.root.after(0, lambda: self.log("Đã là phiên bản mới nhất.", "info"))
-                    else:
-                        self.root.after(0, lambda: self.log(f"Cập nhật thành công! {output}", "success"))
+                # Fallback: chạy UPDATE.py (download ZIP, không cần git)
+                result = subprocess.run([sys.executable, str(TOOL_DIR / "UPDATE.py")],
+                                        cwd=str(TOOL_DIR), capture_output=True, text=True,
+                                        input="", startupinfo=startupinfo, timeout=120)
+                output = result.stdout.strip()
+                if "THANH CONG" in output:
+                    self.root.after(0, lambda: self.log("Cập nhật thành công!", "success"))
+                elif "ERROR" in output:
+                    err_lines = [l for l in output.split('\n') if 'ERROR' in l]
+                    err_msg = err_lines[0].strip() if err_lines else "Update thất bại"
+                    self.root.after(0, lambda: self.log(err_msg, "error"))
                 else:
-                    self.root.after(0, lambda: self.log(f"Lỗi update: {result.stderr}", "error"))
+                    self.root.after(0, lambda: self.log(f"Update done", "info"))
             except Exception as e:
                 self.root.after(0, lambda: self.log(f"Update error: {e}", "error"))
 
