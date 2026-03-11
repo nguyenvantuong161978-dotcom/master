@@ -381,6 +381,13 @@ class VE3ToolGUI:
                                 relief=tk.FLAT, cursor="hand2", padx=8, pady=3)
         settings_btn.pack(side=tk.RIGHT, padx=(5, 0))
 
+        # Update (git pull)
+        update_btn = tk.Button(header, text="UPDATE", font=("Segoe UI", 9, "bold"),
+                              command=self.update_from_github,
+                              bg=COLORS["accent_blue"], fg="#ffffff",
+                              relief=tk.FLAT, cursor="hand2", padx=8, pady=3)
+        update_btn.pack(side=tk.RIGHT, padx=(5, 0))
+
         # Parallel selector
         par_frame = tk.Frame(header, bg=COLORS["bg_dark"])
         par_frame.pack(side=tk.RIGHT, padx=(0, 8))
@@ -1279,6 +1286,33 @@ class VE3ToolGUI:
         # Restart if auto mode is on
         if self.auto_mode:
             self.root.after(3000, self.start_edit)  # Wait 3s then restart
+
+    def update_from_github(self):
+        """Pull latest code from GitHub."""
+        self.log("Đang cập nhật từ GitHub...", "info")
+
+        def do_update():
+            try:
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+
+                result = subprocess.run(["git", "pull", "origin", "main"],
+                                        cwd=str(TOOL_DIR), capture_output=True, text=True,
+                                        startupinfo=startupinfo)
+
+                if result.returncode == 0:
+                    output = result.stdout.strip()
+                    if "Already up to date" in output:
+                        self.root.after(0, lambda: self.log("Đã là phiên bản mới nhất.", "info"))
+                    else:
+                        self.root.after(0, lambda: self.log(f"Cập nhật thành công! {output}", "success"))
+                else:
+                    self.root.after(0, lambda: self.log(f"Lỗi update: {result.stderr}", "error"))
+            except Exception as e:
+                self.root.after(0, lambda: self.log(f"Update error: {e}", "error"))
+
+        threading.Thread(target=do_update, daemon=True).start()
 
     def upload_github(self):
         self.log("Uploading to GitHub...", "info")
