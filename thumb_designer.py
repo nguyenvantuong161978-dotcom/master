@@ -238,6 +238,45 @@ def wrap_pil(draw, text, font, max_w):
     return lines or [text]
 
 
+def smart_wrap_2(draw, text, font, max_w):
+    """Smart wrap into max 2 lines: prefer splitting at punctuation, else balanced."""
+    if draw.textlength(text, font=font) <= max_w:
+        return [text]
+    # Try split at sentence punctuation (. ! ? ,) - prefer rightmost that fits
+    best = None
+    for sep in ['. ', '! ', '? ', ', ', '; ']:
+        idx = -1
+        while True:
+            idx = text.find(sep, idx + 1)
+            if idx < 0:
+                break
+            l1 = text[:idx + len(sep)].strip()
+            l2 = text[idx + len(sep):].strip()
+            if l1 and l2 and draw.textlength(l1, font=font) <= max_w and draw.textlength(l2, font=font) <= max_w:
+                best = [l1, l2]
+    if best:
+        return best
+    # Fallback: balanced split at word boundary closest to middle
+    words = text.split()
+    mid = len(text) // 2
+    best_diff = len(text)
+    best_split = None
+    pos = 0
+    for i, word in enumerate(words[:-1]):
+        pos += len(word) + (1 if i > 0 else 0)
+        diff = abs(pos - mid)
+        if diff < best_diff:
+            l1 = ' '.join(words[:i+1])
+            l2 = ' '.join(words[i+1:])
+            if draw.textlength(l1, font=font) <= max_w and draw.textlength(l2, font=font) <= max_w:
+                best_diff = diff
+                best_split = [l1, l2]
+    if best_split:
+        return best_split
+    # Last fallback: basic word wrap
+    return wrap_pil(draw, text, font, max_w)[:2]
+
+
 def pil_render(design):
     cw = design.get('canvas', {}).get('w', 1920)
     ch = design.get('canvas', {}).get('h', 1080)
@@ -404,6 +443,7 @@ def _pil_render_el(canvas, el, cw, ch):
         shape = el.get('shape', 'pill')
         stroke_w = int(el.get('stroke_width', 0))
         stroke_color = el.get('stroke_color', '#000000')
+        fixed_size = int(el.get('font_size', 0))
 
         bg_rgba = hex_rgba(bg_color)
         if shape == 'pill' and hasattr(draw, 'rounded_rectangle'):
@@ -415,17 +455,86 @@ def _pil_render_el(canvas, el, cw, ch):
             draw.rectangle([x, y, x+w, y+h], fill=bg_rgba)
 
         cx = x + w // 2
-        cy = y + h // 2
-        for sz in range(min(h - 10, 160), 20, -2):
-            f = get_pil_font(font_name, sz)
+        if fixed_size > 0:
+            f = get_pil_font(font_name, fixed_size)
             tw = draw.textlength(text, font=f)
-            if tw <= w - 40:
+            if tw > w - 40:
+                lines = smart_wrap_2(draw, text, f, w - 40)
+                gap = max(4, fixed_size // 8)
+                total_h = len(lines) * fixed_size + (len(lines) - 1) * gap
+                start_cy = y + h // 2 - total_h // 2 + fixed_size // 2
+                for i, line in enumerate(lines):
+                    cy_line = start_cy + i * (fixed_size + gap)
+                    if stroke_w > 0:
+                        draw.text((cx, cy_line), line, fill=hex_rgba(stroke_color),
+                                  font=f, anchor="mm", stroke_width=stroke_w,
+                                  stroke_fill=hex_rgba(stroke_color))
+                    draw.text((cx, cy_line), line, fill=hex_rgba(color), font=f, anchor="mm")
+            else:
+                cy = y + h // 2
                 if stroke_w > 0:
                     draw.text((cx, cy), text, fill=hex_rgba(stroke_color),
                               font=f, anchor="mm", stroke_width=stroke_w,
                               stroke_fill=hex_rgba(stroke_color))
                 draw.text((cx, cy), text, fill=hex_rgba(color), font=f, anchor="mm")
-                break
+        else:
+            # Auto-fit: find largest size that fits in max 2 lines
+            for sz in range(h, 20, -2):
+                f = get_pil_font(font_name, sz)
+                tw = draw.textlength(text, font=f)
+                if tw <= w - 40:
+                    # Fits 1 line - check height
+                    if sz > h - 10:
+                        continue
+                    cy = y + h // 2
+                    if stroke_w > 0:
+                        draw.text((cx, cy), text, fill=hex_rgba(stroke_color),
+                                  font=f, anchor="mm", stroke_width=stroke_w,
+                                  stroke_fill=hex_rgba(stroke_color))
+                    draw.text((cx, cy), text, fill=hex_rgba(color), font=f, anchor="mm")
+                    break
+                else:
+                    # Try 2 lines
+                    lines = smart_wrap_2(draw, text, f, w - 40)
+                    if len(lines) <= 2:
+                        gap = max(4, sz // 8)
+                        total_h = len(lines) * sz + (len(lines) - 1) * gap
+                        if total_h <= h - 10:
+                            start_cy = y + h // 2 - total_h // 2 + sz // 2
+                            for i, line in enumerate(lines):
+                                cy_line = start_cy + i * (sz + gap)
+                                if stroke_w > 0:
+                                    draw.text((cx, cy_line), line, fill=hex_rgba(stroke_color),
+                                              font=f, anchor="mm", stroke_width=stroke_w,
+                                              stroke_fill=hex_rgba(stroke_color))
+                                draw.text((cx, cy_line), line, fill=hex_rgba(color), font=f, anchor="mm")
+                            break
+
+    elif t == 'text_box':
+        text = el.get('sample_text', '')
+        if not text:
+            return
+        color = el.get('color', '#ffffff')
+        bg_color = el.get('bg_color', '#333333')
+        font_name = el.get('font', 'UTM-AvoBold')
+        size = int(el.get('font_size', 48))
+        align = el.get('align', 'center')
+        radius = int(el.get('border_radius', 10))
+
+        bg_rgba = hex_rgba(bg_color)
+        if radius > 0 and hasattr(draw, 'rounded_rectangle'):
+            draw.rounded_rectangle([x, y, x+w, y+h], radius=radius, fill=bg_rgba)
+        else:
+            draw.rectangle([x, y, x+w, y+h], fill=bg_rgba)
+
+        f = get_pil_font(font_name, size)
+        lines = wrap_pil(draw, text, f, w - 20)
+        gap = 6
+        total_h = len(lines) * size + max(0, len(lines) - 1) * gap
+        start_cy = y + h // 2 - total_h // 2 + size // 2
+        for i, line in enumerate(lines):
+            cy_line = start_cy + i * (size + gap)
+            draw.text((x + w // 2, cy_line), line, fill=hex_rgba(color), font=f, anchor="mm")
 
     elif t == 'text_static':
         text = el.get('text', '')
@@ -559,6 +668,41 @@ def wrap_text(draw, text, font, max_w):
     if line:
         lines.append(line)
     return lines or [text]
+
+
+def smart_wrap_2(draw, text, font, max_w):
+    if draw.textlength(text, font=font) <= max_w:
+        return [text]
+    best = None
+    for sep in [". ", "! ", "? ", ", ", "; "]:
+        idx = -1
+        while True:
+            idx = text.find(sep, idx + 1)
+            if idx < 0:
+                break
+            l1 = text[:idx + len(sep)].strip()
+            l2 = text[idx + len(sep):].strip()
+            if l1 and l2 and draw.textlength(l1, font=font) <= max_w and draw.textlength(l2, font=font) <= max_w:
+                best = [l1, l2]
+    if best:
+        return best
+    words = text.split()
+    mid = len(text) // 2
+    best_diff = len(text)
+    best_split = None
+    pos = 0
+    for i, word in enumerate(words[:-1]):
+        pos += len(word) + (1 if i > 0 else 0)
+        diff = abs(pos - mid)
+        if diff < best_diff:
+            l1 = " ".join(words[:i+1])
+            l2 = " ".join(words[i+1:])
+            if draw.textlength(l1, font=font) <= max_w and draw.textlength(l2, font=font) <= max_w:
+                best_diff = diff
+                best_split = [l1, l2]
+    if best_split:
+        return best_split
+    return wrap_text(draw, text, font, max_w)[:2]
 
 
 def split_phrases(raw):
@@ -816,6 +960,7 @@ def render_element(canvas, el, code, data):
         shape        = el.get("shape", "pill")
         stroke_w     = int(el.get("stroke_width", 0))
         stroke_color = el.get("stroke_color", "#000000")
+        fixed_size   = int(el.get("font_size", 0))
 
         bg_rgba = hex_rgba(bg_color)
         if shape == "pill" and hasattr(draw, "rounded_rectangle"):
@@ -825,17 +970,84 @@ def render_element(canvas, el, code, data):
             draw.rectangle([x, y, x+w, y+h], fill=bg_rgba)
 
         cx = x + w // 2
-        cy = y + h // 2
-        for sz in range(min(h - 10, 160), 20, -2):
-            f = get_font(font_name, sz)
+        if fixed_size > 0:
+            f = get_font(font_name, fixed_size)
             tw = int(draw.textlength(text, font=f))
-            if tw <= w - 40:
+            if tw > w - 40:
+                lines = smart_wrap_2(draw, text, f, w - 40)
+                gap = max(4, fixed_size // 8)
+                total_h = len(lines) * fixed_size + (len(lines) - 1) * gap
+                start_cy = y + h // 2 - total_h // 2 + fixed_size // 2
+                for i, line in enumerate(lines):
+                    cy_line = start_cy + i * (fixed_size + gap)
+                    if stroke_w > 0:
+                        draw.text((cx, cy_line), line, fill=hex_rgba(stroke_color),
+                                  font=f, anchor="mm", stroke_width=stroke_w,
+                                  stroke_fill=hex_rgba(stroke_color))
+                    draw.text((cx, cy_line), line, fill=hex_rgba(color), font=f, anchor="mm")
+            else:
+                cy = y + h // 2
                 if stroke_w > 0:
                     draw.text((cx, cy), text, fill=hex_rgba(stroke_color),
                               font=f, anchor="mm", stroke_width=stroke_w,
                               stroke_fill=hex_rgba(stroke_color))
                 draw.text((cx, cy), text, fill=hex_rgba(color), font=f, anchor="mm")
-                break
+        else:
+            # Auto-fit: largest size that fits max 2 lines
+            for sz in range(h, 20, -2):
+                f = get_font(font_name, sz)
+                tw = int(draw.textlength(text, font=f))
+                if tw <= w - 40:
+                    if sz > h - 10:
+                        continue
+                    cy = y + h // 2
+                    if stroke_w > 0:
+                        draw.text((cx, cy), text, fill=hex_rgba(stroke_color),
+                                  font=f, anchor="mm", stroke_width=stroke_w,
+                                  stroke_fill=hex_rgba(stroke_color))
+                    draw.text((cx, cy), text, fill=hex_rgba(color), font=f, anchor="mm")
+                    break
+                else:
+                    lines = smart_wrap_2(draw, text, f, w - 40)
+                    if len(lines) <= 2:
+                        gap = max(4, sz // 8)
+                        total_h = len(lines) * sz + (len(lines) - 1) * gap
+                        if total_h <= h - 10:
+                            start_cy = y + h // 2 - total_h // 2 + sz // 2
+                            for i, line in enumerate(lines):
+                                cy_line = start_cy + i * (sz + gap)
+                                if stroke_w > 0:
+                                    draw.text((cx, cy_line), line, fill=hex_rgba(stroke_color),
+                                              font=f, anchor="mm", stroke_width=stroke_w,
+                                              stroke_fill=hex_rgba(stroke_color))
+                                draw.text((cx, cy_line), line, fill=hex_rgba(color), font=f, anchor="mm")
+                            break
+
+    elif t == "text_box":
+        text = el.get("sample_text", "")
+        if not text:
+            return
+        color      = el.get("color", "#ffffff")
+        bg_color   = el.get("bg_color", "#333333")
+        font_name  = el.get("font", "UTM-AvoBold")
+        size       = int(el.get("font_size", 48))
+        align      = el.get("align", "center")
+        radius     = int(el.get("border_radius", 10))
+
+        bg_rgba = hex_rgba(bg_color)
+        if radius > 0 and hasattr(draw, "rounded_rectangle"):
+            draw.rounded_rectangle([x, y, x+w, y+h], radius=radius, fill=bg_rgba)
+        else:
+            draw.rectangle([x, y, x+w, y+h], fill=bg_rgba)
+
+        f = get_font(font_name, size)
+        lines = wrap_text(draw, text, f, w - 20)
+        gap = 6
+        total_h = len(lines) * size + max(0, len(lines) - 1) * gap
+        start_cy = y + h // 2 - total_h // 2 + size // 2
+        for i, line in enumerate(lines):
+            cy_line = start_cy + i * (size + gap)
+            draw.text((x + w // 2, cy_line), line, fill=hex_rgba(color), font=f, anchor="mm")
 
     elif t == "text_static":
         text = el.get("text", "")
@@ -1003,6 +1215,7 @@ input[type=file] { display: none; }
     <button class="add-btn" onclick="addEl('photo')">👤 Ảnh minh họa</button>
     <button class="add-btn" onclick="addEl('text_main')">📝 Text chính</button>
     <button class="add-btn" onclick="addEl('hook')">🔥 Hook bar</button>
+    <button class="add-btn" onclick="addEl('text_box')">⬜ Khung chữ</button>
     <button class="add-btn" onclick="addEl('text_static')">💬 Text tĩnh</button>
     <div class="section-title" style="margin-top:6px;">Các lớp (trên → dưới)</div>
     <div id="element-list"></div>
@@ -1069,8 +1282,8 @@ function resizeCanvas() {
 }
 
 // ========== ELEMENT DEFAULTS ==========
-const EL_ICON = {background:'🖼',photo:'👤',text_main:'📝',hook:'🔥',text_static:'💬'};
-const EL_LABEL = {background:'Background',photo:'Ảnh minh họa',text_main:'Text chính',hook:'Hook bar',text_static:'Text tĩnh'};
+const EL_ICON = {background:'🖼',photo:'👤',text_main:'📝',hook:'🔥',text_box:'⬜',text_static:'💬'};
+const EL_LABEL = {background:'Background',photo:'Ảnh minh họa',text_main:'Text chính',hook:'Hook bar',text_box:'Khung chữ',text_static:'Text tĩnh'};
 
 function mkEl(type) {
   const id = ++uid;
@@ -1087,8 +1300,12 @@ function mkEl(type) {
                                 hi_stroke_width:0,hi_stroke_color:'#000000'};
     case 'hook':        return {id,type,x:20,y:880,w:1150,h:180,
                                 sample_text:'HOOK TEXT',font:'Anton',
-                                color:'#000000',bg_color:'#ffca22',shape:'pill',
+                                font_size:0,color:'#000000',bg_color:'#ffca22',shape:'pill',
                                 stroke_width:0,stroke_color:'#000000'};
+    case 'text_box':    return {id,type,x:100,y:100,w:500,h:120,
+                                sample_text:'Text here',font:'UTM-AvoBold',
+                                font_size:48,color:'#ffffff',bg_color:'#333333',
+                                border_radius:10,align:'center'};
     case 'text_static': return {id,type,x:20,y:20,w:600,h:80,
                                 text:'Static text',font:'UTM-AvoBold',
                                 font_size:60,color:'#ffffff',align:'center'};
@@ -1243,9 +1460,59 @@ function draw() {
         ctx.fillRect(x,y,w,h);
       }
       ctx.fillStyle = el.color||'#000';
-      const fs = Math.min(h*.55, 40);
-      ctx.font=`bold ${fs}px Inter`; ctx.textAlign='center'; ctx.textBaseline='middle';
-      ctx.fillText((el.sample_text||'HOOK TEXT').toUpperCase(), x+w/2, y+h/2);
+      const fixedSz = el.font_size||0;
+      const hookText = (el.sample_text||'HOOK TEXT').toUpperCase();
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      if (fixedSz > 0) {
+        const fs = fixedSz*s;
+        ctx.font=`bold ${fs}px Inter`;
+        if (ctx.measureText(hookText).width > w-40*s) {
+          const lines = smartWrap2(hookText, w-40*s, fs);
+          const lh = fs*1.15;
+          const totalH = lines.length*lh;
+          let ty = y+h/2 - totalH/2 + fs/2;
+          lines.forEach(ln => { ctx.fillText(ln, x+w/2, ty); ty+=lh; });
+        } else {
+          ctx.fillText(hookText, x+w/2, y+h/2);
+        }
+      } else {
+        // Auto-fit: largest size that fits max 2 lines
+        let drawn = false;
+        for (let sz=Math.floor(h/s); sz>=20; sz-=2) {
+          const fs = sz*s;
+          ctx.font=`bold ${fs}px Inter`;
+          const tw = ctx.measureText(hookText).width;
+          if (tw <= w-40*s) {
+            ctx.fillText(hookText, x+w/2, y+h/2);
+            drawn=true; break;
+          } else {
+            const lines = smartWrap2(hookText, w-40*s, fs);
+            if (lines.length<=2) {
+              const lh=fs*1.15, totalH=lines.length*lh;
+              if (totalH <= h-10*s) {
+                let ty=y+h/2-totalH/2+fs/2;
+                lines.forEach(ln=>{ctx.fillText(ln,x+w/2,ty);ty+=lh;});
+                drawn=true; break;
+              }
+            }
+          }
+        }
+        if (!drawn) { const fs=20*s; ctx.font=`bold ${fs}px Inter`; ctx.fillText(hookText,x+w/2,y+h/2); }
+      }
+    }
+    else if (el.type === 'text_box') {
+      const rad = (el.border_radius||10)*s;
+      ctx.fillStyle = el.bg_color||'#333333';
+      if (rad > 0) { rrect(ctx, x, y, w, h, rad); ctx.fill(); }
+      else { ctx.fillRect(x,y,w,h); }
+      ctx.fillStyle = el.color||'#fff';
+      const fs2 = (el.font_size||48)*s;
+      ctx.font=`bold ${fs2}px Inter`; ctx.textAlign='center'; ctx.textBaseline='middle';
+      const lines2 = wrapCanvas(el.sample_text||'', w-20*s, fs2);
+      const lh2 = fs2*1.2;
+      const totalH2 = lines2.length*lh2;
+      let ty2 = y+h/2 - totalH2/2 + fs2/2;
+      lines2.forEach(ln => { ctx.fillText(ln, x+w/2, ty2); ty2+=lh2; });
     }
     else if (el.type === 'text_static') {
       ctx.fillStyle='rgba(255,255,255,0.03)'; ctx.fillRect(x,y,w,h);
@@ -1277,6 +1544,35 @@ function wrapCanvas(text, maxW, fs) {
   }
   if(line) lines.push(line);
   return lines.length ? lines : [text];
+}
+
+function smartWrap2(text, maxW, fs) {
+  ctx.font = `bold ${fs}px Inter`;
+  if (ctx.measureText(text).width <= maxW) return [text];
+  let best = null;
+  for (const sep of ['. ','! ','? ',', ','; ']) {
+    let idx = -1;
+    while ((idx = text.indexOf(sep, idx+1)) >= 0) {
+      const l1 = text.slice(0, idx+sep.length).trim();
+      const l2 = text.slice(idx+sep.length).trim();
+      if (l1 && l2 && ctx.measureText(l1).width<=maxW && ctx.measureText(l2).width<=maxW)
+        best = [l1, l2];
+    }
+  }
+  if (best) return best;
+  const words = text.split(' '), mid = text.length/2;
+  let bestD = text.length, bestS = null, pos = 0;
+  for (let i=0; i<words.length-1; i++) {
+    pos += words[i].length + (i>0?1:0);
+    const d = Math.abs(pos - mid);
+    if (d < bestD) {
+      const l1 = words.slice(0,i+1).join(' '), l2 = words.slice(i+1).join(' ');
+      if (ctx.measureText(l1).width<=maxW && ctx.measureText(l2).width<=maxW)
+        { bestD=d; bestS=[l1,l2]; }
+    }
+  }
+  if (bestS) return bestS;
+  return wrapCanvas(text, maxW, fs).slice(0,2);
 }
 
 function segmentHighlights(line, phrases) {
@@ -1561,6 +1857,10 @@ function buildProps(el) {
     <div class="pg"><label>Font</label>
       <select onchange="sp('font',this.value);draw()">${fopt(FONTS,el.font)}</select>
     </div>
+    <div class="pg"><label>Cỡ chữ (0 = tự động)</label>
+      <input type="number" value="${el.font_size||0}" min="0" placeholder="0 = auto-fit" onchange="sp('font_size',+this.value);draw()">
+      <div class="lbl" style="font-size:9px;color:#666;margin-top:2px">Nếu chữ dài sẽ tự xuống 2 dòng</div>
+    </div>
     <div class="pg"><label>Màu chữ</label>
       <input type="color" value="${el.color||'#000000'}" oninput="sp('color',this.value)">
     </div>
@@ -1575,6 +1875,30 @@ function buildProps(el) {
         <div><input type="number" value="${el.stroke_width||0}" min="0" onchange="sp('stroke_width',+this.value)"><div class="lbl" style="font-size:9px;color:#666;text-align:center">Width</div></div>
         <div><input type="color" value="${el.stroke_color||'#000000'}" oninput="sp('stroke_color',this.value)"></div>
       </div>
+    </div>`;
+  }
+  else if (el.type==='text_box') {
+    spec = `
+    <div class="pg"><label>Nội dung</label>
+      <input type="text" value="${el.sample_text||''}" onchange="sp('sample_text',this.value);draw()">
+    </div>
+    <div class="pg"><label>Font</label>
+      <select onchange="sp('font',this.value);draw()">${fopt(FONTS,el.font)}</select>
+    </div>
+    <div class="pg"><label>Cỡ chữ (px)</label>
+      <input type="number" value="${el.font_size||48}" onchange="sp('font_size',+this.value);draw()">
+    </div>
+    <div class="pg"><label>Màu chữ</label>
+      <input type="color" value="${el.color||'#ffffff'}" oninput="sp('color',this.value)">
+    </div>
+    <div class="pg"><label>Màu nền khung</label>
+      <input type="color" value="${el.bg_color||'#333333'}" oninput="sp('bg_color',this.value)">
+    </div>
+    <div class="pg"><label>Bo góc (px)</label>
+      <input type="number" value="${el.border_radius||10}" min="0" onchange="sp('border_radius',+this.value);draw()">
+    </div>
+    <div class="pg"><label>Căn chỉnh</label>
+      <select onchange="sp('align',this.value);draw()">${aopt(el.align)}</select>
     </div>`;
   }
   else if (el.type==='text_static') {
@@ -1748,7 +2072,11 @@ function loadPY() {
           alert('Không tìm thấy DESIGN block.\nChỉ hỗ trợ file được Export từ Thumb Designer.');
           return;
         }
-        const d = JSON.parse(match[1]);
+        let raw = match[1];
+        raw = raw.split('True').join('true');
+        raw = raw.split('False').join('false');
+        raw = raw.split('None').join('null');
+        const d = JSON.parse(raw);
         if (!d.canvas || !d.elements) {
           alert('DESIGN không đúng định dạng (cần canvas + elements).');
           return;

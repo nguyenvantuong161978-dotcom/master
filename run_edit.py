@@ -141,7 +141,10 @@ def get_optimal_workers(resources: dict = None, task_type: str = "clip") -> int:
 
         optimal = min(ram_parallel, cpu_parallel) + gpu_bonus
 
-        # Run 2 videos in parallel (safe for GTX 1660 SUPER 6GB VRAM)
+        # Allow override via environment variable (e.g. VE3_PARALLEL=3 for powerful machines)
+        env_parallel = os.environ.get("VE3_PARALLEL")
+        if env_parallel:
+            return int(env_parallel)
         return 2
 
     elif task_type == "clip":
@@ -157,8 +160,10 @@ def get_optimal_workers(resources: dict = None, task_type: str = "clip") -> int:
         # Take minimum of constraints
         optimal = min(ram_workers, cpu_workers)
 
-        # Cap at 8 workers per video (use all physical cores)
-        return max(1, min(optimal, 8))
+        # Cap workers per video (override via VE3_CLIP_WORKERS for powerful machines)
+        env_cap = os.environ.get("VE3_CLIP_WORKERS")
+        cap = int(env_cap) if env_cap else 8
+        return max(1, min(optimal, cap))
 
     elif task_type == "encode":
         # For FFmpeg encoding:
@@ -1517,7 +1522,8 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
 
             # Reduce clip workers when running parallel to avoid CPU overload
             # Solo: 8 workers. Parallel 2x: 5 workers each (5+5=10 on 8 cores, better than 8+8=16)
-            clip_workers = max(4, CLIP_WORKERS - 3) if _parallel_count >= 2 else CLIP_WORKERS
+            _reduce = int(os.environ.get("VE3_WORKER_REDUCE", 3))
+            clip_workers = max(4, CLIP_WORKERS - _reduce) if _parallel_count >= 2 else CLIP_WORKERS
 
             plog(f"  Compose mode: {compose_mode.upper()} ({'OpenCV' if use_opencv_kb else 'FFmpeg'})")
             plog(f"  Transition: {video_transition.upper()} ({transition_duration}s)")

@@ -1,0 +1,452 @@
+[
+  {
+    "timestamp": "2026-03-10 11:45:10",
+    "code": "TA3-0011",
+    "num_clips": 197,
+    "output_resolution": "4k",
+    "use_gpu": true,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 6241.2,
+      "reencode": 336.3,
+      "concat_xfade": 371.7,
+      "audio": 183.7,
+      "subtitle_burn": 1322.8,
+      "nv_overlay": 13.6,
+      "total": 8469.4
+    }
+  },
+  {
+    "timestamp": "2026-03-10 13:23:28",
+    "code": "KA3-0014",
+    "num_clips": 148,
+    "output_resolution": "4k",
+    "use_gpu": true,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 3913.3,
+      "reencode": 240.1,
+      "concat_xfade": 274.2,
+      "audio": 163.0,
+      "subtitle_burn": 1235.4,
+      "nv_overlay": 9.5,
+      "total": 5835.5
+    }
+  },
+  {
+    "timestamp": "2026-03-10 14:04:03",
+    "code": "KA4-0035",
+    "num_clips": 207,
+    "output_resolution": "4k",
+    "use_gpu": false,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 4607.6,
+      "reencode": 941.9,
+      "concat_xfade": 1346.1,
+      "audio": 283.0,
+      "subtitle_burn": 3788.0,
+      "nv_overlay": 1.5,
+      "total": 10968.1
+    }
+  },
+  {
+    "timestamp": "2026-03-10 16:40:05",
+    "code": "KA3-0013",
+    "num_clips": 190,
+    "output_resolution": "4k",
+    "use_gpu": true,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 2899.5,
+      "reencode": 318.6,
+      "concat_xfade": 363.4,
+      "audio": 164.6,
+      "subtitle_burn": 1262.3,
+      "nv_overlay": 14.2,
+      "total": 5022.6
+    }
+  },
+  {
+    "timestamp": "2026-03-10 21:45:17",
+    "code": "TA1-0010",
+    "num_clips": 169,
+    "output_resolution": "4k",
+    "use_gpu": false,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 3183.9,
+      "reencode": 729.2,
+      "concat_xfade": 1003.2,
+      "audio": 175.2,
+      "subtitle_burn": 3461.0,
+      "nv_overlay": 2.0,
+      "total": 8554.5
+    }
+  },
+  {
+    "timestamp": "2026-03-10 22:02:03",
+    "code": "TA6-0001",
+    "num_clips": 102,
+    "output_resolution": "4k",
+    "use_gpu": true,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 5442.5,
+      "reencode": 309.0,
+      "concat_xfade": 389.4,
+      "audio": 257.8,
+      "subtitle_burn": 1314.7,
+      "nv_overlay": 10.2,
+      "total": 7723.6
+    }
+  },
+  {
+    "timestamp": "2026-03-10 23:01:54",
+    "code": "KA5-0037",
+    "num_clips": 102,
+    "output_resolution": "4k",
+    "use_gpu": true,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 1947.2,
+      "reencode": 165.0,
+      "concat_xfade": 182.2,
+      "audio": 87.5,
+      "subtitle_burn": 1138.0,
+      "nv_overlay": 15.8,
+      "total": 3535.7
+    }
+  },
+  {
+    "timestamp": "2026-03-11 00:31:13",
+    "code": "KA1-0027",
+    "num_clips": 186,
+    "output_resolution": "4k",
+    "use_gpu": false,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 3827.5,
+      "reencode": 829.8,
+      "concat_xfade": 1438.9,
+      "audio": 176.3,
+      "subtitle_burn": 3645.2,
+      "nv_overlay": 1.2,
+      "total": 9918.9
+    }
+  },
+  {
+    "timestamp": "2026-03-11 00:58:01",
+    "code": "TA2-0012",
+    "num_clips": 146,
+    "output_resolution": "4k",
+    "use_gpu": true,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 5166.4,
+      "reencode": 259.4,
+      "concat_xfade": 283.6,
+      "audio": 138.2,
+      "subtitle_burn": 1017.5,
+      "nv_overlay": 9.4,
+      "total": 6874.6
+    }
+  },
+  {
+    "timestamp": "2026-03-11 03:01:46",
+    "code": "KA3-0015",
+    "num_clips": 217,
+    "output_resolution": "4k",
+    "use_gpu": false,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 3420.6,
+      "reencode": 715.3,
+      "concat_xfade": 1324.0,
+      "audio": 155.2,
+      "subtitle_burn": 3370.6,
+      "nv_overlay": 3.8,
+      "total": 8989.5
+    }
+  },
+  {
+    "timestamp": "2026-03-11 03:03:13",
+    "code": "KA4-0036",
+    "num_clips": 129,
+    "output_resolution": "4k",
+    "use_gpu": true,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 4967.9,
+      "reencode": 299.8,
+      "concat_xfade": 386.1,
+      "audio": 248.1,
+      "subtitle_burn": 1528.1,
+      "nv_overlay": 14.6,
+      "total": 7444.5
+    }
+  },
+  {
+    "timestamp": "2026-03-11 04:28:52",
+    "code": "TA5-0007",
+    "num_clips": 138,
+    "output_resolution": "4k",
+    "use_gpu": true,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 2737.6,
+      "reencode": 247.9,
+      "concat_xfade": 272.0,
+      "audio": 126.7,
+      "subtitle_burn": 1684.6,
+      "nv_overlay": 9.1,
+      "total": 5077.8
+    }
+  },
+  {
+    "timestamp": "2026-03-11 05:31:55",
+    "code": "TA4-0009",
+    "num_clips": 160,
+    "output_resolution": "4k",
+    "use_gpu": false,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 3601.5,
+      "reencode": 741.8,
+      "concat_xfade": 1083.6,
+      "audio": 146.4,
+      "subtitle_burn": 3397.0,
+      "nv_overlay": 1.8,
+      "total": 8972.0
+    }
+  },
+  {
+    "timestamp": "2026-03-11 06:18:44",
+    "code": "KA2-0035",
+    "num_clips": 113,
+    "output_resolution": "4k",
+    "use_gpu": true,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 4661.0,
+      "reencode": 283.0,
+      "concat_xfade": 304.8,
+      "audio": 160.7,
+      "subtitle_burn": 1118.7,
+      "nv_overlay": 10.5,
+      "total": 6538.8
+    }
+  },
+  {
+    "timestamp": "2026-03-11 07:58:02",
+    "code": "TA6-0002",
+    "num_clips": 115,
+    "output_resolution": "4k",
+    "use_gpu": false,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 3689.7,
+      "reencode": 680.7,
+      "concat_xfade": 958.3,
+      "audio": 164.5,
+      "subtitle_burn": 3236.8,
+      "nv_overlay": 1.4,
+      "total": 8731.5
+    }
+  },
+  {
+    "timestamp": "2026-03-11 08:23:05",
+    "code": "KA1-0028",
+    "num_clips": 138,
+    "output_resolution": "4k",
+    "use_gpu": true,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 5396.1,
+      "reencode": 301.5,
+      "concat_xfade": 366.9,
+      "audio": 145.2,
+      "subtitle_burn": 1176.3,
+      "nv_overlay": 20.0,
+      "total": 7405.9
+    }
+  },
+  {
+    "timestamp": "2026-03-11 10:13:07",
+    "code": "TA3-0012",
+    "num_clips": 140,
+    "output_resolution": "4k",
+    "use_gpu": false,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 3227.9,
+      "reencode": 649.1,
+      "concat_xfade": 917.0,
+      "audio": 143.5,
+      "subtitle_burn": 3126.6,
+      "nv_overlay": 1.2,
+      "total": 8065.3
+    }
+  },
+  {
+    "timestamp": "2026-03-11 10:37:04",
+    "code": "TA1-0012",
+    "num_clips": 93,
+    "output_resolution": "4k",
+    "use_gpu": true,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 5651.5,
+      "reencode": 336.4,
+      "concat_xfade": 415.0,
+      "audio": 228.3,
+      "subtitle_burn": 1334.1,
+      "nv_overlay": 17.0,
+      "total": 7982.2
+    }
+  },
+  {
+    "timestamp": "2026-03-11 11:40:15",
+    "code": "KA5-0038",
+    "num_clips": 102,
+    "output_resolution": "4k",
+    "use_gpu": false,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 2057.9,
+      "reencode": 444.9,
+      "concat_xfade": 623.6,
+      "audio": 88.2,
+      "subtitle_burn": 1978.2,
+      "nv_overlay": 0.9,
+      "total": 5193.8
+    }
+  },
+  {
+    "timestamp": "2026-03-11 12:40:22",
+    "code": "KA4-0037",
+    "num_clips": 142,
+    "output_resolution": "4k",
+    "use_gpu": true,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 5251.1,
+      "reencode": 327.9,
+      "concat_xfade": 355.8,
+      "audio": 153.4,
+      "subtitle_burn": 1230.0,
+      "nv_overlay": 15.7,
+      "total": 7333.8
+    }
+  },
+  {
+    "timestamp": "2026-03-11 14:59:00",
+    "code": "TA5-0008",
+    "num_clips": 188,
+    "output_resolution": "4k",
+    "use_gpu": true,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 5557.2,
+      "reencode": 318.2,
+      "concat_xfade": 412.3,
+      "audio": 269.7,
+      "subtitle_burn": 1682.5,
+      "nv_overlay": 16.2,
+      "total": 8256.1
+    }
+  },
+  {
+    "timestamp": "2026-03-11 15:13:28",
+    "code": "TA2-0013",
+    "num_clips": 227,
+    "output_resolution": "4k",
+    "use_gpu": false,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 5197.2,
+      "reencode": 1021.0,
+      "concat_xfade": 1441.6,
+      "audio": 241.1,
+      "subtitle_burn": 4852.4,
+      "nv_overlay": 6.6,
+      "total": 12760.0
+    }
+  },
+  {
+    "timestamp": "2026-03-11 16:36:42",
+    "code": "TA3-0013",
+    "num_clips": 161,
+    "output_resolution": "4k",
+    "use_gpu": true,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 3293.8,
+      "reencode": 269.8,
+      "concat_xfade": 298.6,
+      "audio": 144.2,
+      "subtitle_burn": 1774.6,
+      "nv_overlay": 13.6,
+      "total": 5794.6
+    }
+  },
+  {
+    "timestamp": "2026-03-11 17:33:50",
+    "code": "TA1-0013",
+    "num_clips": 197,
+    "output_resolution": "4k",
+    "use_gpu": false,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 3327.7,
+      "reencode": 694.8,
+      "concat_xfade": 982.3,
+      "audio": 159.5,
+      "subtitle_burn": 3216.1,
+      "nv_overlay": 1.2,
+      "total": 8381.6
+    }
+  },
+  {
+    "timestamp": "2026-03-11 18:53:04",
+    "code": "KA2-0036",
+    "num_clips": 166,
+    "output_resolution": "4k",
+    "use_gpu": true,
+    "clip_workers": 5,
+    "transition": "xfade",
+    "steps_s": {
+      "clip_creation": 5181.6,
+      "reencode": 337.0,
+      "concat_xfade": 379.3,
+      "audio": 200.6,
+      "subtitle_burn": 2004.2,
+      "nv_overlay": 19.3,
+      "total": 8121.9
+    }
+  }
+]
