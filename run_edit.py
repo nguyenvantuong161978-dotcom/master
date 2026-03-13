@@ -1778,8 +1778,9 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                 # Keep clips at render_size (1080p) for xfade - upscale happens after merge in subtitle burn
                 reencode_tasks = [(i, cp, temp_dir, use_gpu, gpu_encoder, False, render_size) for i, cp in enumerate(clip_paths)]
 
-                # Use parallel workers (limit to 6 for GPU: 6 × ~500MB = 3GB VRAM, safe for 6GB GPU)
-                reencode_workers = min(6, clip_workers) if use_gpu else clip_workers
+                # Use parallel workers (limit for GPU VRAM: each ~500MB)
+                reencode_cap = int(os.environ.get("VE3_REENCODE_WORKERS", 6))
+                reencode_workers = min(reencode_cap, clip_workers) if use_gpu else clip_workers
                 reencoded_results = []
 
                 with ThreadPoolExecutor(max_workers=reencode_workers) as executor:
@@ -1897,7 +1898,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                         return None
 
                 # Process in batches to avoid Windows command line length limit
-                BATCH_SIZE = 15
+                BATCH_SIZE = int(os.environ.get("VE3_BATCH_SIZE", 15))
                 xfade_success = False
 
                 if len(clip_paths) <= BATCH_SIZE:
