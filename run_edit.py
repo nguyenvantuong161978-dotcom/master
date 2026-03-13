@@ -2618,7 +2618,8 @@ def update_sheet_status(codes: List[str], callback=None) -> Tuple[int, int]:
 
     gc, spreadsheet_name, cfg = load_gsheet_client()
     if not gc:
-        return 0, 0
+        plog("Sheet update skipped: không load được Google Sheet client (thiếu creds.json hoặc gspread?)", "WARN")
+        return -1, 0
 
     try:
         from gspread.exceptions import APIError
@@ -2815,6 +2816,10 @@ def process_project(project_info: Dict, callback=None) -> bool:
         max_sheet_retries = 10
         for sheet_attempt in range(max_sheet_retries):
             found, updated = update_sheet_status([code], callback)
+            if found == -1:
+                # Config error (missing creds.json / gspread) - no point retrying
+                plog(f"Sheet update skipped: thiếu config. Copy config/creds.json từ máy chính.", "ERROR")
+                break
             if updated > 0:
                 plog(f"Sheet updated: {STATUS_VALUE}")
                 sheet_updated = True
@@ -2832,8 +2837,7 @@ def process_project(project_info: Dict, callback=None) -> bool:
                     time.sleep(delay)
 
         if not sheet_updated:
-            plog(f"CRITICAL: Sheet update failed after {max_sheet_retries} attempts! NOT cleaning up source data.", "ERROR")
-            plog(f"Please manually update sheet for code: {code}", "ERROR")
+            plog(f"Sheet update failed for {code}. Video done nhưng chưa điền Sheet.", "ERROR")
             # Still return True because video is done, but don't cleanup
             return True
 
