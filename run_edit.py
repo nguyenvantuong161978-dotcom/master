@@ -1442,11 +1442,13 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             use_gpu = resources.get("gpu_available", False)
             gpu_encoder = resources.get("gpu_encoder", "libx264")
 
-            # Slot 0 = GPU, Slot 1+ = CPU (never compete for GPU between parallel videos)
-            if _parallel_slot > 0 and use_gpu:
+            # Slot 0 = GPU, Slot 1+ = CPU (unless VE3_GPU_SLOTS allows more)
+            # VE3_GPU_SLOTS=2 means slot 0 and 1 both use GPU (for 12GB+ VRAM cards)
+            gpu_slots = int(os.environ.get("VE3_GPU_SLOTS", 1))
+            if _parallel_slot >= gpu_slots and use_gpu:
                 use_gpu = False
                 gpu_encoder = "libx264"
-                plog(f"  Slot {_parallel_slot}: CPU mode (slot 0 owns GPU)")
+                plog(f"  Slot {_parallel_slot}: CPU mode (GPU slots: 0-{gpu_slots-1})")
 
             if use_gpu:
                 plog(f"  GPU Encoder: {gpu_encoder.upper()}")
