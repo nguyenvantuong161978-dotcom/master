@@ -1,0 +1,9 @@
+openpyxl
+Pillow
+gspread
+google-auth
+flask
+opencv-python
+numpy
+torch
+torchvision
