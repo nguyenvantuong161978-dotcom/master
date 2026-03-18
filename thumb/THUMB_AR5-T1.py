@@ -83,7 +83,7 @@ def load_record(code):
             "https://www.googleapis.com/auth/drive.readonly",
         ])
         gc = gspread.authorize(creds)
-        ws = gc.open("KA").worksheet("INPUT")
+        ws = gc.open("AYS3").worksheet("INPUT")
         rows = ws.get_all_values()[1:]
         for r in rows:
             if r and r[0].strip() == code:
