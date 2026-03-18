@@ -98,28 +98,36 @@ FONTS_MAP = {
 
 
 # ============ GOOGLE SHEETS ============
-def load_record(code):
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        cred_path = CONFIG_FILE.parent / cfg.get("CREDENTIAL_PATH", "creds.json")
-        creds = Credentials.from_service_account_file(str(cred_path), scopes=[
-            "https://www.googleapis.com/auth/spreadsheets.readonly",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ])
-        gc = gspread.authorize(creds)
-        ws = gc.open("KA").worksheet("INPUT")
-        rows = ws.get_all_values()[1:]
-        for r in rows:
-            if r and r[0].strip() == code:
-                return {
-                    "text_thumb": r[20].strip() if len(r) > 20 else "",
-                    "hook":       r[21].strip() if len(r) > 21 else "",
-                    "highlights": r[22].strip() if len(r) > 22 else "",
-                }
-    except Exception as e:
-        print(f"[WARN] Sheets error: {e}")
-    return {"text_thumb": "", "hook": "", "highlights": ""}
+def load_record(code, max_retries=5):
+    import time
+    for attempt in range(max_retries):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            cred_path = CONFIG_FILE.parent / cfg.get("CREDENTIAL_PATH", "creds.json")
+            creds = Credentials.from_service_account_file(str(cred_path), scopes=[
+                "https://www.googleapis.com/auth/spreadsheets.readonly",
+                "https://www.googleapis.com/auth/drive.readonly",
+            ])
+            gc = gspread.authorize(creds)
+            ws = gc.open("KA").worksheet("INPUT")
+            rows = ws.get_all_values()[1:]
+            for r in rows:
+                if r and r[0].strip() == code:
+                    return {
+                        "text_thumb": r[20].strip() if len(r) > 20 else "",
+                        "hook":       r[21].strip() if len(r) > 21 else "",
+                        "highlights": r[22].strip() if len(r) > 22 else "",
+                    }
+            return {"text_thumb": "", "hook": "", "highlights": ""}
+        except Exception as e:
+            wait = 3 * (attempt + 1)
+            print(f"[WARN] Sheets error (attempt {attempt+1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                print(f"  Retry in {wait}s...")
+                time.sleep(wait)
+    print(f"[ERROR] Sheets failed after {max_retries} attempts. Cannot proceed without data.")
+    return None
 
 
 # ============ HELPERS ============
@@ -581,6 +589,9 @@ def main():
 
     print(f"  Processing: {code}")
     data = load_record(code)
+    if data is None:
+        print(f"  SKIP {code}: không lấy được dữ liệu trang tính sau nhiều lần thử")
+        return
 
     cw = DESIGN["canvas"]["w"]
     ch = DESIGN["canvas"]["h"]
