@@ -188,9 +188,72 @@ class VoiceToSrt:
             "language": self.language,
             "task": "transcribe",
             "verbose": False,
+            "word_timestamps": True,
         }
         options.update(kwargs)
-        return self._model.transcribe(str(audio_path), **options)
+        result = self._model.transcribe(str(audio_path), **options)
+
+        # Split long segments into sentence-level using word timestamps
+        result["segments"] = self._split_long_segments(result.get("segments", []))
+        return result
+
+    @staticmethod
+    def _split_long_segments(segments, max_duration=15.0, max_words=25):
+        """Split segments longer than max_duration into sentence-level chunks.
+        Uses word-level timestamps if available, otherwise splits by punctuation."""
+        import re
+        out = []
+        for seg in segments:
+            duration = seg.get("end", 0) - seg.get("start", 0)
+            words = seg.get("words", [])
+
+            # Short enough → keep as is
+            if duration <= max_duration and len(seg.get("text", "").split()) <= max_words:
+                out.append(seg)
+                continue
+
+            # Has word timestamps → split by sentence boundaries
+            if words:
+                chunk_words = []
+                chunk_start = None
+                for w in words:
+                    wtext = w.get("word", w.get("text", "")).strip()
+                    if not wtext:
+                        continue
+                    if chunk_start is None:
+                        chunk_start = w.get("start", 0)
+                    chunk_words.append(wtext)
+                    chunk_end = w.get("end", 0)
+
+                    # Split at sentence-ending punctuation or if chunk is long enough
+                    is_sentence_end = bool(re.search(r'[.!?,;:]$', wtext))
+                    chunk_dur = chunk_end - chunk_start
+                    if is_sentence_end and (chunk_dur >= 2.0 or len(chunk_words) >= 6):
+                        text = " ".join(chunk_words)
+                        out.append({"start": chunk_start, "end": chunk_end, "text": text})
+                        chunk_words = []
+                        chunk_start = None
+
+                # Remaining words
+                if chunk_words and chunk_start is not None:
+                    text = " ".join(chunk_words)
+                    out.append({"start": chunk_start, "end": chunk_end, "text": text})
+            else:
+                # No word timestamps → split text by sentences, distribute time evenly
+                text = seg.get("text", "").strip()
+                sentences = re.split(r'(?<=[.!?])\s+', text)
+                sentences = [s.strip() for s in sentences if s.strip()]
+                if len(sentences) <= 1:
+                    out.append(seg)
+                    continue
+                total_chars = sum(len(s) for s in sentences)
+                cur_time = seg.get("start", 0)
+                for s in sentences:
+                    ratio = len(s) / max(total_chars, 1)
+                    s_dur = duration * ratio
+                    out.append({"start": cur_time, "end": cur_time + s_dur, "text": s})
+                    cur_time += s_dur
+        return out
 
     def _write_srt(self, result, output_path):
         segments = result.get("segments", [])
