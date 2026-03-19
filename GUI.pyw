@@ -374,6 +374,14 @@ class VE3ToolGUI:
         tk.Label(header, text="VE3 Tool", font=("Segoe UI", 16, "bold"),
                 bg=COLORS["bg_dark"], fg=COLORS["text"]).pack(side=tk.LEFT)
 
+        # Sheet connection info
+        sheet_info = self._get_sheet_info()
+        self._sheet_label = tk.Label(header, text=sheet_info, font=("Consolas", 9),
+                                      bg=COLORS["bg_dark"], fg=COLORS["accent_orange"],
+                                      cursor="hand2")
+        self._sheet_label.pack(side=tk.LEFT, padx=(12, 0))
+        self._sheet_label.bind("<Button-1>", lambda e: self._show_config_info())
+
         # Settings
         settings_btn = tk.Button(header, text="Cai dat", font=("Segoe UI", 9),
                                 command=self.open_subtitle_settings,
@@ -401,6 +409,63 @@ class VE3ToolGUI:
         self.auto_btn = ModernButton(header, "Chay Auto", self.toggle_auto_mode,
                                     COLORS["accent_green"], width=100, height=32)
         self.auto_btn.pack(side=tk.RIGHT, padx=(0, 8))
+
+    # ================================================================
+    # SHEET CONFIG INFO
+    # ================================================================
+
+    def _get_sheet_info(self):
+        """Read config.json and return sheet connection summary."""
+        try:
+            cfg_path = TOOL_DIR / "config" / "config.json"
+            if cfg_path.exists():
+                cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+                ss = cfg.get("SPREADSHEET_NAME", "?")
+                ws = cfg.get("SHEET_NAME", "?")
+                return f"[Sheet: {ss}/{ws}]"
+        except Exception:
+            pass
+        return "[Sheet: not configured]"
+
+    def _show_config_info(self):
+        """Show dialog with full config/creds info."""
+        cfg_path = TOOL_DIR / "config" / "config.json"
+        info_lines = []
+
+        try:
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            info_lines.append(f"Config file:\n  {cfg_path}\n")
+            info_lines.append(f"SPREADSHEET_NAME: {cfg.get('SPREADSHEET_NAME', '(missing)')}")
+            info_lines.append(f"SHEET_NAME: {cfg.get('SHEET_NAME', '(missing)')}")
+            info_lines.append(f"PROMPT_SHEET: {cfg.get('PROMPT_SHEET', '(missing)')}")
+            info_lines.append("")
+
+            # Creds file
+            cred_name = cfg.get("CREDENTIAL_PATH") or cfg.get("SERVICE_ACCOUNT_JSON") or "creds.json"
+            cred_path = TOOL_DIR / "config" / cred_name
+            if cred_path.exists():
+                info_lines.append(f"Credentials: {cred_path}  ✓ OK")
+            else:
+                info_lines.append(f"Credentials: {cred_path}  ✗ MISSING!")
+
+            # TTS key
+            tts_name = cfg.get("TTS_CREDENTIAL_PATH", "key.json")
+            tts_path = TOOL_DIR / "config" / tts_name
+            if tts_path.exists():
+                info_lines.append(f"TTS Key: {tts_path}  ✓ OK")
+            else:
+                info_lines.append(f"TTS Key: {tts_path}  ✗ MISSING!")
+
+        except Exception as e:
+            info_lines.append(f"Error reading config: {e}")
+            info_lines.append(f"\nFile config cần đặt tại:\n  {cfg_path}")
+
+        info_lines.append(f"\n--- File cần có trong config/ ---")
+        info_lines.append(f"  config.json  - cấu hình chính")
+        info_lines.append(f"  creds.json   - Google Sheets service account")
+        info_lines.append(f"  key.json     - Google TTS service account")
+
+        messagebox.showinfo("Sheet & Config Info", "\n".join(info_lines))
 
     # ================================================================
     # PROCESS BAR - compact status indicators + controls
