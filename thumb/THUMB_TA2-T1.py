@@ -298,20 +298,21 @@ def render_element(canvas, el, code, data):
         canvas.paste(Image.new("RGBA", (cw, ch), hex_rgba(el.get("color", "#1a1a2e"))), (0, 0))
 
     elif t == "photo":
-        # Try thumb_004.png first, fallback to thumb_003.png, then any image
         thumb_dir = VISUAL_DIR / code / "thumbnail"
-        photo_path = thumb_dir / "thumb_004.png"
-        if not photo_path.exists():
-            photo_path = thumb_dir / "thumb_003.png"
-        if not photo_path.exists():
-            for ext in (".png", ".jpg", ".jpeg", ".webp"):
-                for _f in thumb_dir.glob(f"*{ext}"):
-                    photo_path = _f; break
-                else: continue
-                break
-        if not photo_path.exists():
-            print(f"  [WARN] Photo not found in: {thumb_dir}")
+        nv_path = VISUAL_DIR / code / "nv" / "nv1.png"
+        thumb_candidates = [thumb_dir / f"thumb_{i:03d}.png" for i in [4,5,6,1,2,3]]
+
+        photo_path = None
+        candidates = thumb_candidates + [nv_path]
+        for c in candidates:
+            if c.exists():
+                photo_path = c; break
+
+        if photo_path is None:
+            print(f"  [WARN] No photo found for {code} (checked thumbnail/ and nv/)")
             return
+
+        print(f"  [photo] Using: {photo_path.name}")
         img = Image.open(photo_path).convert("RGBA")
         scale = h / img.height
         nw = int(img.width * scale)
