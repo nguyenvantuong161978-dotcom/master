@@ -124,7 +124,11 @@ class Launcher:
                 loading.pack(pady=50)
                 self.root.update()
 
-                from GUI import VE3ToolGUI
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("GUI_pyw", str(TOOL_DIR / "GUI.pyw"))
+                gui_mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(gui_mod)
+                VE3ToolGUI = gui_mod.VE3ToolGUI
                 loading.destroy()
                 app = VE3ToolGUI(self.root, parent=frame)
                 self.tab_apps[key] = app
