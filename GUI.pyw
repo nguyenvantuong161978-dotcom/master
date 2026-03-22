@@ -308,13 +308,17 @@ class ModernButton(tk.Canvas):
 # ============================================================================
 
 class VE3ToolGUI:
-    def __init__(self, root):
+    def __init__(self, root, parent=None):
         self.root = root
-        self.root.title("VE3 Tool")
-        self.root.geometry("900x700")
-        self.root.configure(bg=COLORS["bg_dark"])
-        self.root.resizable(True, True)
-        self.root.minsize(700, 550)
+        self.parent = parent if parent else root  # parent frame for embedding
+
+        # Only configure root window when running standalone
+        if parent is None:
+            self.root.title("VE3 Tool")
+            self.root.geometry("900x700")
+            self.root.configure(bg=COLORS["bg_dark"])
+            self.root.resizable(True, True)
+            self.root.minsize(700, 550)
 
         # Process handles
         self.srt_process = None
@@ -357,7 +361,7 @@ class VE3ToolGUI:
     def create_ui(self):
         self.current_tab = "edit_queue"
 
-        main = tk.Frame(self.root, bg=COLORS["bg_dark"])
+        main = tk.Frame(self.parent, bg=COLORS["bg_dark"])
         main.pack(fill=tk.BOTH, expand=True, padx=20, pady=15)
 
         self.create_header(main)
