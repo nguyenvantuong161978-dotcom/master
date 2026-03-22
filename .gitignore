@@ -28,3 +28,13 @@ temp/
 
 # Claude
 .claude/
+
+# Heavy thumb data (local only)
+thumb/MODNet/
+thumb/pic/
+thumb/nv/
+thumb/thumbnails/
+thumb/assets/*.png
+thumb/Thumbs.db
+_designer_uploads/
+images/
