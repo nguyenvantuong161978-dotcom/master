@@ -276,9 +276,12 @@ def process_project(project_info, records):
     log(f"  [OK] Thumbnail generated: {thumb_output.name}")
 
     # Copy to VISUAL/{code}/{code}.jpg (for run_edit.py to pick up)
-    final_thumb = project_dir / f"{code}.jpg"
-    shutil.copy2(thumb_output, final_thumb)
-    log(f"  [OK] Copied to VISUAL: {final_thumb.name}")
+    if project_dir.exists():
+        final_thumb = project_dir / f"{code}.jpg"
+        shutil.copy2(thumb_output, final_thumb)
+        log(f"  [OK] Copied to VISUAL: {final_thumb.name}")
+    else:
+        log(f"  [WARN] VISUAL folder gone, skip copy: {project_dir}", "WARN")
 
     return True
 
