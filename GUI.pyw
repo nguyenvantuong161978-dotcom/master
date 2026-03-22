@@ -382,6 +382,12 @@ class VE3ToolGUI:
         self._sheet_label.pack(side=tk.LEFT, padx=(12, 0))
         self._sheet_label.bind("<Button-1>", lambda e: self._show_config_info())
 
+        # Today stats
+        self._today_label = tk.Label(header, text="", font=("Consolas", 9, "bold"),
+                                      bg=COLORS["bg_dark"], fg=COLORS["success"])
+        self._today_label.pack(side=tk.LEFT, padx=(12, 0))
+        self._update_today_stats()
+
         # Settings
         settings_btn = tk.Button(header, text="Cai dat", font=("Segoe UI", 9),
                                 command=self.open_subtitle_settings,
@@ -1069,6 +1075,28 @@ class VE3ToolGUI:
             return f"{minutes:02d}:{secs:02d}"
 
 
+    def _update_today_stats(self):
+        """Count videos completed today from timing_log.json."""
+        try:
+            from datetime import date
+            today_str = date.today().isoformat()
+            timing_file = TOOL_DIR / "timing_log.json"
+            count = 0
+            if timing_file.exists():
+                with open(timing_file, "r", encoding="utf-8") as f:
+                    entries = json.load(f)
+                seen = set()
+                for entry in entries:
+                    ts = entry.get("timestamp", "")
+                    code = entry.get("code", "")
+                    if ts.startswith(today_str) and code and code not in seen:
+                        seen.add(code)
+                        count += 1
+            self._today_label.config(text=f"Hom nay: {count} ma" if count else "")
+        except Exception:
+            pass
+        self.root.after(30000, self._update_today_stats)
+
     def refresh_stats(self):
         """Refresh stats và code list."""
         self.refresh_code_list()
@@ -1172,9 +1200,8 @@ class VE3ToolGUI:
     def _on_srt_line(self, line, level):
         """Process SRT output line - log and update status with current code."""
         self.log(f"[SRT] {line}", level)
-        # Try to detect code from line (e.g. "Processing KA1-0001" or "[KA1-0001]")
         import re
-        m = re.search(r'(KA\d+-\d+)', line)
+        m = re.search(r'([A-Z]+\d*-\d+)', line)
         if m:
             code = m.group(1)
             self._set_proc_info(self.srt_proc, f"> {code}")
@@ -1248,7 +1275,7 @@ class VE3ToolGUI:
         """Process Thumb output line - log and update status with current code."""
         self.log(f"[THUMB] {line}", level)
         import re
-        m = re.search(r'(KA\d+-\d+)', line)
+        m = re.search(r'([A-Z]+\d*-\d+)', line)
         if m:
             code = m.group(1)
             self._set_proc_info(self.thumb_proc, f"> {code}")
