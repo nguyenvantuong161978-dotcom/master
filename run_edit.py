@@ -971,7 +971,7 @@ def get_project_info(project_dir: Path) -> Dict:
                     coverage = info["media_count"] / info["total_scenes"]
                     log(f"    - {code}: After fill, coverage is now {coverage:.0%}")
 
-            info["ready_for_edit"] = coverage >= 0.8
+            info["ready_for_edit"] = coverage >= 0.5
         else:
             info["ready_for_edit"] = True
 
@@ -1023,8 +1023,17 @@ def scan_visual_projects() -> List[Dict]:
                 reasons.append("no excel")
             if info["total_scenes"] > 0 and info["media_count"] > 0:
                 coverage = info["media_count"] / info["total_scenes"]
-                if coverage < 0.8:
-                    reasons.append(f"coverage {coverage:.0%} < 80%")
+                if coverage < 0.5:
+                    reasons.append(f"coverage {coverage:.0%} < 50%")
+                    # Auto-delete from VISUAL so VMs will redo this project
+                    try:
+                        import shutil
+                        visual_path = VISUAL_DIR / code
+                        if visual_path.exists():
+                            shutil.rmtree(visual_path)
+                            log(f"    - {code}: DELETED from VISUAL (coverage {coverage:.0%} < 50%, VMs will redo)")
+                    except Exception as e:
+                        log(f"    - {code}: Failed to delete: {e}", "WARN")
             log(f"    - {code}: NOT ready ({', '.join(reasons)})")
 
     return sorted(projects, key=lambda x: x["code"])
