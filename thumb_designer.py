@@ -889,18 +889,26 @@ def render_element(canvas, el, code, data):
     elif t == "photo":
         thumb_dir = VISUAL_DIR / code / "thumbnail"
         nv_path = VISUAL_DIR / code / "nv" / "nv1.png"
-        thumb_candidates = [thumb_dir / f"thumb_{i:03d}.png" for i in <<<THUMB_ORDER>>>]
+        photo_num = el.get("photo_num", "auto")
 
         photo_path = None
-        if el.get("remove_bg"):
-            # Prefer nv1.png, fallback to thumb images
-            candidates = [nv_path] + thumb_candidates
-            for c in candidates:
-                if c.exists():
-                    photo_path = c; break
-        else:
-            # Prefer thumb images, fallback to nv1.png
-            candidates = thumb_candidates + [nv_path]
+        if photo_num and photo_num != "auto":
+            # Specific photo requested
+            if photo_num == "nv1":
+                if nv_path.exists():
+                    photo_path = nv_path
+            else:
+                specific = thumb_dir / f"thumb_{int(photo_num):03d}.png"
+                if specific.exists():
+                    photo_path = specific
+
+        if photo_path is None:
+            # Fallback: auto-detect
+            thumb_candidates = [thumb_dir / f"thumb_{i:03d}.png" for i in <<<THUMB_ORDER>>>]
+            if el.get("remove_bg"):
+                candidates = [nv_path] + thumb_candidates
+            else:
+                candidates = thumb_candidates + [nv_path]
             for c in candidates:
                 if c.exists():
                     photo_path = c; break
@@ -1808,10 +1816,17 @@ function buildProps(el) {
     </div>`;
   }
   else if (el.type==='photo') {
+    const pnOpts = [['auto','Tu dong'],['1','thumb_001'],['2','thumb_002'],['3','thumb_003'],['4','thumb_004'],['5','thumb_005'],['6','thumb_006'],['nv1','nv1.png']];
+    const pnSel = pnOpts.map(([v,l])=>`<option value="${v}"${(el.photo_num||'auto')===v?' selected':''}>${l}</option>`).join('');
     spec = `
+    <div class="pg"><label>Chon anh</label>
+      <select onchange="sp('photo_num',this.value)" style="width:100%;padding:6px;border-radius:4px;background:#2a2a3e;color:#fff;border:1px solid #444">
+        ${pnSel}
+      </select>
+      <div style="font-size:10px;color:#666;margin-top:5px">Tu dong: lay theo thu tu fallback. Chon cu the de dat nhieu anh khac nhau.</div>
+    </div>
     <div class="pg"><label>Preview ảnh (tạm, không lưu vào py)</label>
       <button class="btn" style="width:100%" onclick="document.getElementById('fi-photo').click()">📁 Chọn ảnh preview</button>
-      <div style="font-size:10px;color:#666;margin-top:5px">Ảnh thật sẽ lấy từ<br>VISUAL/{code}/thumbnail/thumb_004.png</div>
     </div>
     <div class="pg">
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
