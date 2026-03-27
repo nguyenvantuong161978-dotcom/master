@@ -1623,6 +1623,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                         v_preset = ["-preset", "p4"] if kb_config['use_gpu'] else ["-preset", "medium"]
 
                         if video_duration > target_duration:
+                            # Video longer → trim from center
                             trim_start = (video_duration - target_duration) / 2
                             cmd_clip = [
                                 "ffmpeg", "-y", "-ss", str(trim_start), "-i", abs_path,
@@ -1630,7 +1631,18 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                                 "-c:v", v_encoder, *v_preset, "-pix_fmt", "yuv420p",
                                 "-an", "-r", str(kb_config['fps']), str(clip_path)
                             ]
+                        elif video_duration < target_duration and video_duration > 0.5:
+                            # Video shorter → slow down to fill target duration
+                            slow_factor = target_duration / video_duration
+                            slow_vf = f"setpts={slow_factor}*PTS,{vf}"
+                            cmd_clip = [
+                                "ffmpeg", "-y", "-i", abs_path,
+                                "-vf", slow_vf, "-c:v", v_encoder, *v_preset,
+                                "-pix_fmt", "yuv420p", "-an", "-r", str(kb_config['fps']),
+                                "-t", str(target_duration), str(clip_path)
+                            ]
                         else:
+                            # Video same duration → use as-is
                             cmd_clip = [
                                 "ffmpeg", "-y", "-i", abs_path, "-t", str(target_duration),
                                 "-vf", vf, "-c:v", v_encoder, *v_preset,
