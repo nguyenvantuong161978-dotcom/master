@@ -1087,21 +1087,14 @@ def render_element(canvas, el, code, data):
 
 
 # ============ MAIN ============
-def main():
-    code = sys.argv[1] if len(sys.argv) > 1 else None
-    if not code:
-        print("Usage: python THUMB_<<<TEMPLATE_NAME>>>.py <code>")
-        sys.exit(1)
+MULTI_PHOTO = <<<MULTI_PHOTO>>>  # True = generate 3 thumbnails per code (thumb_001, 002, 003)
 
-    out_path = OUTPUT_DIR / f"{code}.jpg"
+def render_one(code, data, photo_override=None, suffix=""):
+    """Render one thumbnail. photo_override forces all photo elements to use specific thumb."""
+    out_name = f"{code}{suffix}.jpg"
+    out_path = OUTPUT_DIR / out_name
     if out_path.exists():
-        print(f"  Skip {code} (already exists)")
-        return
-
-    print(f"  Processing: {code}")
-    data = load_record(code)
-    if data is None:
-        print(f"  SKIP {code}: không lấy được dữ liệu trang tính sau nhiều lần thử")
+        print(f"  Skip {out_name} (already exists)")
         return
 
     cw = DESIGN["canvas"]["w"]
@@ -1110,13 +1103,38 @@ def main():
 
     for el in DESIGN.get("elements", []):
         try:
-            render_element(canvas, el, code, data)
+            if photo_override and el.get("type") == "photo":
+                el_copy = dict(el)
+                el_copy["photo_num"] = str(photo_override)
+                render_element(canvas, el_copy, code, data)
+            else:
+                render_element(canvas, el, code, data)
         except Exception as e:
             print(f"  [WARN] Element {el.get('type')}: {e}")
 
     save_jpeg(canvas, out_path)
     size_kb = out_path.stat().st_size // 1024 if out_path.exists() else 0
-    print(f"  Saved: {out_path.name} ({size_kb} KB)")
+    print(f"  Saved: {out_name} ({size_kb} KB)")
+
+def main():
+    code = sys.argv[1] if len(sys.argv) > 1 else None
+    if not code:
+        print("Usage: python THUMB_<<<TEMPLATE_NAME>>>.py <code>")
+        sys.exit(1)
+
+    print(f"  Processing: {code}")
+    data = load_record(code)
+    if data is None:
+        print(f"  SKIP {code}: không lấy được dữ liệu trang tính sau nhiều lần thử")
+        return
+
+    if MULTI_PHOTO:
+        # Generate 3 thumbnails with different photos
+        render_one(code, data, photo_override=1, suffix="")
+        render_one(code, data, photo_override=2, suffix="_2")
+        render_one(code, data, photo_override=3, suffix="_3")
+    else:
+        render_one(code, data)
 
 
 if __name__ == "__main__":
@@ -1144,6 +1162,7 @@ def generate_py(design, template_name):
     input_sheet = config_data.get('SHEET_NAME', 'INPUT')
 
     thumb_order = design.get('thumb_order', '[4,5,6,1,2,3]')
+    multi_photo = 'True' if design.get('multi_photo') else 'False'
 
     py = PY_TEMPLATE
     py = py.replace('<<<TEMPLATE_NAME>>>', template_name)
@@ -1152,6 +1171,7 @@ def generate_py(design, template_name):
     py = py.replace('<<<SHEET_NAME>>>', sheet_name)
     py = py.replace('<<<INPUT_SHEET>>>', input_sheet)
     py = py.replace('<<<THUMB_ORDER>>>', thumb_order)
+    py = py.replace('<<<MULTI_PHOTO>>>', multi_photo)
     return py
 
 
@@ -1229,6 +1249,10 @@ input[type=file] { display: none; }
     <option value="[4,5,6,1,2,3]">004 truoc (KA/TA)</option>
     <option value="[1,2,3,4,5,6]">001 truoc (chu de moi)</option>
   </select>
+  <label style="display:flex;align-items:center;gap:4px;cursor:pointer;margin-left:8px">
+    <input type="checkbox" id="multi_photo" style="width:14px;height:14px">
+    <span style="font-size:12px">3 anh/ma</span>
+  </label>
   <button class="btn" onclick="doPreview()">👁 Preview PIL</button>
   <button class="btn green" onclick="doExport()">💾 Export .py</button>
   <button class="btn purple" onclick="saveJSON()">📥 Save JSON</button>
@@ -2045,9 +2069,11 @@ async function doExport() {
 
 function exportDesign() {
   const thumbOrder = document.getElementById('thumb_order').value;
+  const multiPhoto = document.getElementById('multi_photo').checked;
   return {
     canvas: design.canvas,
     thumb_order: thumbOrder,
+    multi_photo: multiPhoto,
     elements: design.elements.map(el => {
       const e = Object.assign({}, el);
       delete e.src;  // Remove blob URL
