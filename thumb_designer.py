@@ -889,7 +889,7 @@ def render_element(canvas, el, code, data):
     elif t == "photo":
         thumb_dir = VISUAL_DIR / code / "thumbnail"
         nv_path = VISUAL_DIR / code / "nv" / "nv1.png"
-        thumb_candidates = [thumb_dir / f"thumb_{i:03d}.png" for i in [4,5,6,1,2,3]]
+        thumb_candidates = [thumb_dir / f"thumb_{i:03d}.png" for i in <<<THUMB_ORDER>>>]
 
         photo_path = None
         if el.get("remove_bg"):
@@ -1135,12 +1135,15 @@ def generate_py(design, template_name):
     sheet_name  = config_data.get('SPREADSHEET_NAME', 'KA')
     input_sheet = config_data.get('SHEET_NAME', 'INPUT')
 
+    thumb_order = design.get('thumb_order', '[4,5,6,1,2,3]')
+
     py = PY_TEMPLATE
     py = py.replace('<<<TEMPLATE_NAME>>>', template_name)
     py = py.replace('<<<DATE>>>', datetime.now().strftime("%Y-%m-%d %H:%M"))
     py = py.replace('<<<DESIGN_JSON>>>', config_json)
     py = py.replace('<<<SHEET_NAME>>>', sheet_name)
     py = py.replace('<<<INPUT_SHEET>>>', input_sheet)
+    py = py.replace('<<<THUMB_ORDER>>>', thumb_order)
     return py
 
 
@@ -1213,6 +1216,11 @@ input[type=file] { display: none; }
   <span class="logo">🎨 Thumb Designer</span>
   <label>Template:</label>
   <input type="text" id="tname" value="KA1-T1" placeholder="KA1-T5, TA2-T1, DT1-T1...">
+  <label>Thumb:</label>
+  <select id="thumb_order" style="padding:4px;border-radius:4px;background:#2a2a3e;color:#fff;border:1px solid #444">
+    <option value="[4,5,6,1,2,3]">004 truoc (KA/TA)</option>
+    <option value="[1,2,3,4,5,6]">001 truoc (chu de moi)</option>
+  </select>
   <button class="btn" onclick="doPreview()">👁 Preview PIL</button>
   <button class="btn green" onclick="doExport()">💾 Export .py</button>
   <button class="btn purple" onclick="saveJSON()">📥 Save JSON</button>
@@ -2021,8 +2029,10 @@ async function doExport() {
 }
 
 function exportDesign() {
+  const thumbOrder = document.getElementById('thumb_order').value;
   return {
     canvas: design.canvas,
+    thumb_order: thumbOrder,
     elements: design.elements.map(el => {
       const e = Object.assign({}, el);
       delete e.src;  // Remove blob URL
