@@ -482,6 +482,31 @@ def process_voice_to_srt(voice_path: Path) -> bool:
         except:
             pass
 
+        # Auto-detect language from audio (first 30s)
+        try:
+            if WHISPER_AVAILABLE or WHISPER_TIMESTAMPED_AVAILABLE:
+                import whisper
+                detect_model = whisper.load_model("base")
+                audio = whisper.load_audio(str(voice_path))
+                audio_30s = whisper.pad_or_trim(audio)
+                mel = whisper.log_mel_spectrogram(audio_30s).to(detect_model.device)
+                _, probs = detect_model.detect_language(mel)
+                detected_lang = max(probs, key=probs.get)
+                detected_prob = probs[detected_lang]
+                safe_print(f"[SRT] {name}: Detected language: {detected_lang} ({detected_prob:.0%})")
+
+                if detected_lang == "vi":
+                    whisper_model = "base"
+                    whisper_lang = "vi"
+                    safe_print(f"[SRT] {name}: Using base model for Vietnamese")
+                else:
+                    whisper_lang = detected_lang
+                    safe_print(f"[SRT] {name}: Using {whisper_model} model for {detected_lang}")
+
+                del detect_model
+        except Exception as e:
+            safe_print(f"[SRT] {name}: Language detect failed ({e}), using default: {whisper_lang}")
+
         conv = VoiceToSrt(model_name=whisper_model, language=whisper_lang)
 
         # Create SRT as .tmp first (in voice folder)
