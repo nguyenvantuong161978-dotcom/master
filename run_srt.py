@@ -427,10 +427,15 @@ def process_voice_to_srt(voice_path: Path) -> bool:
         safe_print(f"[SRT] {name}: Already in VISUAL (being processed), skipping...")
         return True
 
-    # Paths in voice folder (where we create SRT first)
-    local_srt_tmp = voice_dir / f"{name}.srt.tmp"
-    local_srt = voice_dir / f"{name}.srt"
-    local_txt = voice_dir / f"{name}.txt"
+    # Paths in temp folder (NOT voice folder, to avoid SRT being mistaken as voice)
+    srt_temp_dir = TOOL_DIR / "temp" / "srt"
+    srt_temp_dir.mkdir(parents=True, exist_ok=True)
+    local_srt_tmp = srt_temp_dir / f"{name}.srt.tmp"
+    local_srt = srt_temp_dir / f"{name}.srt"
+    local_txt = srt_temp_dir / f"{name}.txt"
+    # Also check legacy location (voice folder) for backwards compat
+    legacy_srt = voice_dir / f"{name}.srt"
+    legacy_txt = voice_dir / f"{name}.txt"
 
     # Paths in PROJECTS folder (final destination)
     output_dir = PROJECTS_DIR / name
@@ -441,21 +446,32 @@ def process_voice_to_srt(voice_path: Path) -> bool:
         return True
 
     # Already have local SRT? Just copy to PROJECTS atomically
+    # Check new location first, then legacy (voice folder)
+    found_srt = None
+    found_txt = None
     if local_srt.exists():
+        found_srt = local_srt
+        found_txt = local_txt if local_txt.exists() else None
+    elif legacy_srt.exists():
+        found_srt = legacy_srt
+        found_txt = legacy_txt if legacy_txt.exists() else None
+        # Move legacy SRT out of voice folder
+        safe_print(f"[SRT] {name}: Moving legacy SRT from voice folder...")
+        try:
+            shutil.copy2(found_srt, local_srt)
+            if found_txt:
+                shutil.copy2(found_txt, local_txt)
+            found_srt.unlink()
+            if found_txt:
+                found_txt.unlink()
+            found_srt = local_srt
+            found_txt = local_txt if local_txt.exists() else None
+        except Exception as e:
+            safe_print(f"[SRT] {name}: Move legacy failed: {e}")
+
+    if found_srt:
         safe_print(f"[SRT] {name}: Local SRT found, copying to PROJECTS...")
-
-        # Check if .txt.tmp exists (leftover from failed previous run)
-        local_txt_tmp = voice_dir / f"{name}.txt.tmp"
-        if local_txt_tmp.exists():
-            safe_print(f"[SRT] {name}: Found leftover .txt.tmp, renaming...")
-            try:
-                if local_txt.exists():
-                    local_txt.unlink()
-                local_txt_tmp.rename(local_txt)
-            except Exception as e:
-                safe_print(f"[SRT] {name}: Cannot rename txt.tmp: {e}")
-
-        if copy_to_projects_atomic(name, voice_path, local_srt, local_txt):
+        if copy_to_projects_atomic(name, voice_path, found_srt, found_txt):
             return True
         return False
 
@@ -509,7 +525,7 @@ def process_voice_to_srt(voice_path: Path) -> bool:
 
         conv = VoiceToSrt(model_name=whisper_model, language=whisper_lang)
 
-        # Create SRT as .tmp first (in voice folder)
+        # Create SRT as .tmp first (in temp folder, NOT voice folder)
         conv.transcribe(str(voice_path), str(local_srt_tmp))
 
         # Rename .tmp to .srt (delete existing first if any)
@@ -517,14 +533,20 @@ def process_voice_to_srt(voice_path: Path) -> bool:
             local_srt.unlink()
         local_srt_tmp.rename(local_srt)
 
-        # Also rename the .txt.tmp if it was created
-        local_txt_tmp = voice_dir / f"{name}.txt.tmp"
-        if local_txt_tmp.exists():
-            if local_txt.exists():
-                local_txt.unlink()
-            local_txt_tmp.rename(local_txt)
+        # Also check for .txt.tmp (Whisper may create in voice folder or temp folder)
+        for txt_tmp_dir in [srt_temp_dir, voice_dir]:
+            local_txt_tmp = txt_tmp_dir / f"{name}.txt.tmp"
+            if local_txt_tmp.exists():
+                if local_txt.exists():
+                    local_txt.unlink()
+                if txt_tmp_dir == srt_temp_dir:
+                    local_txt_tmp.rename(local_txt)
+                else:
+                    shutil.copy2(local_txt_tmp, local_txt)
+                    local_txt_tmp.unlink()
+                break
 
-        safe_print(f"[SRT] {name}: SRT created in voice folder")
+        safe_print(f"[SRT] {name}: SRT created in temp folder")
 
         # Now copy to PROJECTS atomically (VM only sees when complete)
         if copy_to_projects_atomic(name, voice_path, local_srt, local_txt):
