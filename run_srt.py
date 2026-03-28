@@ -405,13 +405,14 @@ def process_voice_to_srt(voice_path: Path) -> bool:
     """Process voice file to SRT.
 
     Flow:
-    1. Create SRT in temp/srt/ folder (NOT voice folder, to avoid SRT being mistaken as voice)
+    1. Create SRT in SRT_<code>/ subfolder next to voice file
     2. When Whisper completes, rename .tmp to .srt
-    3. Copy voice + SRT to PROJECTS atomically (using temp folder)
+    3. Copy voice + SRT to PROJECTS atomically
 
     This ensures:
     - SRT only appears when fully complete
-    - SRT not in voice folder (no collision with TTS/voice tools)
+    - SRT in subfolder, not loose next to MP3 (no collision with TTS/voice tools)
+    - Easy to manage: delete voice folder = delete SRT too
     - VM only sees PROJECTS folder when all files are ready
     """
     name = voice_path.stem
@@ -428,15 +429,17 @@ def process_voice_to_srt(voice_path: Path) -> bool:
         safe_print(f"[SRT] {name}: Already in VISUAL (being processed), skipping...")
         return True
 
-    # Paths in temp folder (NOT voice folder, to avoid SRT being mistaken as voice)
-    srt_temp_dir = TOOL_DIR / "temp" / "srt"
-    srt_temp_dir.mkdir(parents=True, exist_ok=True)
-    local_srt_tmp = srt_temp_dir / f"{name}.srt.tmp"
-    local_srt = srt_temp_dir / f"{name}.srt"
-    local_txt = srt_temp_dir / f"{name}.txt"
-    # Also check legacy location (voice folder) for backwards compat
+    # Paths in SRT subfolder next to voice file (SRT_<code>/ folder)
+    srt_subdir = voice_dir / f"SRT_{name}"
+    srt_subdir.mkdir(parents=True, exist_ok=True)
+    local_srt_tmp = srt_subdir / f"{name}.srt.tmp"
+    local_srt = srt_subdir / f"{name}.srt"
+    local_txt = srt_subdir / f"{name}.txt"
+    # Also check legacy locations for backwards compat
     legacy_srt = voice_dir / f"{name}.srt"
     legacy_txt = voice_dir / f"{name}.txt"
+    temp_srt = TOOL_DIR / "temp" / "srt" / f"{name}.srt"
+    temp_txt = TOOL_DIR / "temp" / "srt" / f"{name}.txt"
 
     # Paths in PROJECTS folder (final destination)
     output_dir = PROJECTS_DIR / name
@@ -446,29 +449,32 @@ def process_voice_to_srt(voice_path: Path) -> bool:
     if project_srt.exists():
         return True
 
-    # Already have local SRT? Just copy to PROJECTS atomically
-    # Check new location first, then legacy (voice folder)
+    # Already have SRT? Check: SRT_<code>/ subfolder, legacy (voice root), temp/srt/
     found_srt = None
     found_txt = None
     if local_srt.exists():
+        # Found in SRT_<code>/ subfolder (new location)
         found_srt = local_srt
         found_txt = local_txt if local_txt.exists() else None
-    elif legacy_srt.exists():
-        found_srt = legacy_srt
-        found_txt = legacy_txt if legacy_txt.exists() else None
-        # Move legacy SRT out of voice folder
-        safe_print(f"[SRT] {name}: Moving legacy SRT from voice folder...")
-        try:
-            shutil.copy2(found_srt, local_srt)
-            if found_txt:
-                shutil.copy2(found_txt, local_txt)
-            found_srt.unlink()
-            if found_txt:
-                found_txt.unlink()
-            found_srt = local_srt
-            found_txt = local_txt if local_txt.exists() else None
-        except Exception as e:
-            safe_print(f"[SRT] {name}: Move legacy failed: {e}")
+    else:
+        # Check legacy locations and migrate to SRT_<code>/
+        for leg_srt, leg_txt in [(legacy_srt, legacy_txt), (temp_srt, temp_txt)]:
+            if leg_srt.exists():
+                safe_print(f"[SRT] {name}: Moving legacy SRT to SRT_{name}/...")
+                try:
+                    shutil.copy2(leg_srt, local_srt)
+                    if leg_txt.exists():
+                        shutil.copy2(leg_txt, local_txt)
+                    leg_srt.unlink()
+                    if leg_txt.exists():
+                        leg_txt.unlink()
+                    found_srt = local_srt
+                    found_txt = local_txt if local_txt.exists() else None
+                except Exception as e:
+                    safe_print(f"[SRT] {name}: Move legacy failed: {e}")
+                    found_srt = leg_srt
+                    found_txt = leg_txt if leg_txt.exists() else None
+                break
 
     if found_srt:
         safe_print(f"[SRT] {name}: Local SRT found, copying to PROJECTS...")
@@ -534,20 +540,14 @@ def process_voice_to_srt(voice_path: Path) -> bool:
             local_srt.unlink()
         local_srt_tmp.rename(local_srt)
 
-        # Also check for .txt.tmp (Whisper may create in voice folder or temp folder)
-        for txt_tmp_dir in [srt_temp_dir, voice_dir]:
-            local_txt_tmp = txt_tmp_dir / f"{name}.txt.tmp"
-            if local_txt_tmp.exists():
-                if local_txt.exists():
-                    local_txt.unlink()
-                if txt_tmp_dir == srt_temp_dir:
-                    local_txt_tmp.rename(local_txt)
-                else:
-                    shutil.copy2(local_txt_tmp, local_txt)
-                    local_txt_tmp.unlink()
-                break
+        # Move .txt.tmp to SRT subfolder (Whisper creates it next to .srt.tmp)
+        local_txt_tmp = srt_subdir / f"{name}.txt.tmp"
+        if local_txt_tmp.exists():
+            if local_txt.exists():
+                local_txt.unlink()
+            local_txt_tmp.rename(local_txt)
 
-        safe_print(f"[SRT] {name}: SRT created in temp folder")
+        safe_print(f"[SRT] {name}: SRT created in SRT_{name}/")
 
         # Now copy to PROJECTS atomically (VM only sees when complete)
         if copy_to_projects_atomic(name, voice_path, local_srt, local_txt):
@@ -576,7 +576,7 @@ def scan_voice_folder(voice_dir: Path) -> list:
             voice_files.append(f)
 
     for subdir in voice_dir.iterdir():
-        if subdir.is_dir():
+        if subdir.is_dir() and not subdir.name.startswith("SRT_"):
             for f in subdir.iterdir():
                 if f.is_file() and f.suffix.lower() in voice_extensions:
                     voice_files.append(f)
