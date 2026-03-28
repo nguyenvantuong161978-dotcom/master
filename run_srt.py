@@ -405,12 +405,13 @@ def process_voice_to_srt(voice_path: Path) -> bool:
     """Process voice file to SRT.
 
     Flow:
-    1. Create SRT in voice folder (as .srt.tmp while processing)
+    1. Create SRT in temp/srt/ folder (NOT voice folder, to avoid SRT being mistaken as voice)
     2. When Whisper completes, rename .tmp to .srt
     3. Copy voice + SRT to PROJECTS atomically (using temp folder)
 
     This ensures:
     - SRT only appears when fully complete
+    - SRT not in voice folder (no collision with TTS/voice tools)
     - VM only sees PROJECTS folder when all files are ready
     """
     name = voice_path.stem
@@ -481,7 +482,7 @@ def process_voice_to_srt(voice_path: Path) -> bool:
         safe_print(f"[SRT] {name}: File is still changing, skipping for now...")
         return False
 
-    # Create SRT in voice folder
+    # Create SRT in temp folder
     safe_print(f"[SRT] {name}: File stable, creating SRT (Whisper)...")
     try:
         # Load settings
