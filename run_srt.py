@@ -429,18 +429,6 @@ def process_voice_to_srt(voice_path: Path) -> bool:
         safe_print(f"[SRT] {name}: Already in VISUAL (being processed), skipping...")
         return True
 
-    # Paths in SRT subfolder next to voice file (SRT_<code>/ folder)
-    srt_subdir = voice_dir / f"SRT_{name}"
-    srt_subdir.mkdir(parents=True, exist_ok=True)
-    local_srt_tmp = srt_subdir / f"{name}.srt.tmp"
-    local_srt = srt_subdir / f"{name}.srt"
-    local_txt = srt_subdir / f"{name}.txt"
-    # Also check legacy locations for backwards compat
-    legacy_srt = voice_dir / f"{name}.srt"
-    legacy_txt = voice_dir / f"{name}.txt"
-    temp_srt = TOOL_DIR / "temp" / "srt" / f"{name}.srt"
-    temp_txt = TOOL_DIR / "temp" / "srt" / f"{name}.txt"
-
     # Paths in PROJECTS folder (final destination)
     output_dir = PROJECTS_DIR / name
     project_srt = output_dir / f"{name}.srt"
@@ -448,6 +436,21 @@ def process_voice_to_srt(voice_path: Path) -> bool:
     # Already done in PROJECTS?
     if project_srt.exists():
         return True
+
+    # SRT subfolder: same level as voice file
+    # voice/KA1-0001.mp3 → voice/SRT_KA1-0001/
+    # voice/KA1-0001/KA1-0001.mp3 → voice/KA1-0001/SRT_KA1-0001/ (inside code folder)
+    voice_root = voice_dir
+    srt_subdir = voice_root / f"SRT_{name}"
+    srt_subdir.mkdir(parents=True, exist_ok=True)
+    local_srt_tmp = srt_subdir / f"{name}.srt.tmp"
+    local_srt = srt_subdir / f"{name}.srt"
+    local_txt = srt_subdir / f"{name}.txt"
+    # Legacy locations for backwards compat
+    legacy_srt = voice_dir / f"{name}.srt"
+    legacy_txt = voice_dir / f"{name}.txt"
+    temp_srt = TOOL_DIR / "temp" / "srt" / f"{name}.srt"
+    temp_txt = TOOL_DIR / "temp" / "srt" / f"{name}.txt"
 
     # Already have SRT? Check: SRT_<code>/ subfolder, legacy (voice root), temp/srt/
     found_srt = None
@@ -488,7 +491,7 @@ def process_voice_to_srt(voice_path: Path) -> bool:
         safe_print(f"[SRT] {name}: File is still changing, skipping for now...")
         return False
 
-    # Create SRT in temp folder
+    # Create SRT in SRT_<code>/ subfolder
     safe_print(f"[SRT] {name}: File stable, creating SRT (Whisper)...")
     try:
         # Load settings
@@ -532,7 +535,7 @@ def process_voice_to_srt(voice_path: Path) -> bool:
 
         conv = VoiceToSrt(model_name=whisper_model, language=whisper_lang)
 
-        # Create SRT as .tmp first (in temp folder, NOT voice folder)
+        # Create SRT as .tmp first (in SRT_<code>/ subfolder)
         conv.transcribe(str(voice_path), str(local_srt_tmp))
 
         # Rename .tmp to .srt (delete existing first if any)
@@ -619,9 +622,6 @@ def get_pending_srt(voice_dir: Path) -> list:
         # Check if SRT exists in PROJECTS
         project_dir = PROJECTS_DIR / name
         project_srt = project_dir / f"{name}.srt"
-
-        # Check if local SRT exists (in voice folder)
-        local_srt = voice_folder / f"{name}.srt"
 
         # Need processing if: no project SRT (either need Whisper or need copy)
         if not project_srt.exists():
