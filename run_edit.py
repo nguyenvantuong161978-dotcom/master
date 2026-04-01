@@ -1027,7 +1027,6 @@ def scan_visual_projects() -> List[Dict]:
                     reasons.append(f"coverage {coverage:.0%} < 50%")
                     # Auto-delete from VISUAL so VMs will redo this project
                     try:
-                        import shutil
                         visual_path = VISUAL_DIR / code
                         if visual_path.exists():
                             shutil.rmtree(visual_path)
