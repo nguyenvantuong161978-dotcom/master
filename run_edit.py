@@ -1783,8 +1783,14 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                     if completed_count % 20 == 0:
                         plog(f"  ... {completed_count}/{total_clips} clips")
 
-            # Collect successful clips in order
-            clip_paths = [p for p in clip_results if p is not None]
+            # Collect successful clips in order, keeping original media_items index for timing
+            # clip_index_map[clip_position] = media_items_index (needed for xfade_srt_offsets lookup)
+            clip_paths = []
+            clip_media_indices = []  # parallel list: which media_items[i] each clip belongs to
+            for orig_idx, p in enumerate(clip_results):
+                if p is not None:
+                    clip_paths.append(p)
+                    clip_media_indices.append(orig_idx)
 
             if not clip_paths:
                 return False, None, "No clips created"
@@ -1802,11 +1808,14 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
 
                 def reencode_single_clip(args):
                     """Re-encode a single clip - runs in parallel."""
-                    i, cp, temp_dir_path, use_gpu_enc, gpu_enc, do_upscale, final_size = args
+                    i, cp, temp_dir_path, use_gpu_enc, gpu_enc, do_upscale, final_size, target_dur = args
                     reenc_path = Path(temp_dir_path) / f"hq_{i:03d}.mp4"
 
                     # Build scale filter for upscaling
                     scale_filter = f"scale={final_size[0]}:{final_size[1]}:flags=lanczos" if do_upscale else ""
+
+                    # -t ensures reencoded clip is exactly target duration (prevents FFmpeg frame rounding drift)
+                    t_arg = ["-t", f"{target_dur:.6f}"] if target_dur and target_dur > 0 else []
 
                     if use_gpu_enc:
                         base_cmd = [
@@ -1814,7 +1823,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                         ]
                         if scale_filter:
                             base_cmd.extend(["-vf", scale_filter])
-                        base_cmd.extend([
+                        base_cmd.extend(t_arg + [
                             "-c:v", gpu_enc, "-preset", "p5",
                             "-rc", "vbr", "-cq", "18", "-b:v", "25M",
                             "-pix_fmt", "yuv420p", "-r", "30", "-an",
@@ -1827,7 +1836,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                         ]
                         if scale_filter:
                             base_cmd.extend(["-vf", scale_filter])
-                        base_cmd.extend([
+                        base_cmd.extend(t_arg + [
                             "-c:v", "libx264", "-preset", "fast", "-crf", "17",
                             "-profile:v", "high", "-pix_fmt", "yuv420p", "-r", "30", "-an",
                             str(reenc_path)
@@ -1849,7 +1858,12 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                         return (i, cp)
 
                 # Keep clips at render_size (1080p) for xfade - upscale happens after merge in subtitle burn
-                reencode_tasks = [(i, cp, temp_dir, use_gpu, gpu_encoder, False, render_size) for i, cp in enumerate(clip_paths)]
+                # Pass target_duration so reencode trims exactly to correct length (prevents frame rounding drift)
+                reencode_tasks = [
+                    (i, cp, temp_dir, use_gpu, gpu_encoder, False, render_size,
+                     media_items[clip_media_indices[i]]['duration'])
+                    for i, cp in enumerate(clip_paths)
+                ]
 
                 # Use parallel workers (limit for GPU VRAM: each ~500MB)
                 reencode_cap = int(os.environ.get("VE3_REENCODE_WORKERS", 6))
@@ -2058,20 +2072,21 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
 
                 D_abs = DISCLAIMER_DURATION if any(it.get('is_disclaimer') for it in media_items) else 0.0
 
-                # Build absolute desired appearance times for ALL clips
-                abs_desired = {}  # global_clip_idx -> absolute video time when scene fully visible
-                for idx, item in enumerate(media_items):
+                # Build absolute desired appearance times keyed by CLIP POSITION in clip_paths.
+                # clip_media_indices[clip_pos] = original media_items index, handles skipped clips.
+                abs_desired = {}  # clip_position -> absolute video time when scene fully visible
+                for clip_pos, media_idx in enumerate(clip_media_indices):
+                    item = media_items[media_idx]
                     if item.get('is_disclaimer'):
-                        abs_desired[idx] = 0.0  # disclaimer at 0, no transition into it
+                        abs_desired[clip_pos] = 0.0
                     else:
                         srt_s = item.get('start', 0.0)
                         if srt_s < 0:
                             srt_s = 0.0
-                        abs_desired[idx] = D_abs + srt_s
+                        abs_desired[clip_pos] = D_abs + srt_s
 
-                # Build xfade_srt_offsets: global_clip_idx -> WITHIN-BATCH transition start time
-                # This is computed per-call in xfade_batch using batch_start_index
-                xfade_srt_offsets = abs_desired  # pass abs times, batch will compute relative
+                # xfade_srt_offsets uses clip_position keys (same as abs_desired)
+                xfade_srt_offsets = abs_desired
 
                 plog(f"  xfade offsets (srt_start-based): {len(xfade_srt_offsets)} clips")
                 if len(xfade_srt_offsets) >= 3:
@@ -2238,7 +2253,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             # sheet with start_time data, mix each track at the correct timestamp.
             # Each track is trimmed so it ends exactly when the next track starts.
             # Voice stays at 100%; music is blended at MUSIC_VOLUME (18%).
-            MUSIC_VOLUME = 0.20   # 20% ≈ -14 dB (nghe nhẹ music, không lấn át voice)
+            MUSIC_VOLUME = 0.25   # 25% ≈ -12 dB (nghe nhẹ music, không lấn át voice)
             music_dir    = project_dir / "music"
             music_segments = []  # list of (start_sec, allowed_dur_sec, mp3_path)
 
