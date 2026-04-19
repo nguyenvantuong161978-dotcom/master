@@ -58,6 +58,20 @@ PROJECTS_DIR = TOOL_DIR / "PROJECTS"  # SRT projects folder
 CONFIG_FILE = TOOL_DIR / "config" / "config.json"
 PROGRESS_FILE = TOOL_DIR / "progress.json"
 
+# Inject ffmpeg path into process environment (supports D:\upload\ffmpeg\bin)
+_FFMPEG_CANDIDATES = [
+    Path(r"D:\upload\ffmpeg\bin"),
+    Path(r"E:\AUTOMATION\ffmpeg\bin"),
+    Path(r"C:\ffmpeg\bin"),
+    Path(r"D:\ffmpeg\bin"),
+]
+for _ffdir in _FFMPEG_CANDIDATES:
+    if _ffdir.exists() and (_ffdir / "ffmpeg.exe").exists():
+        import os as _os
+        _os.environ["PATH"] = str(_ffdir) + _os.pathsep + _os.environ.get("PATH", "")
+        print(f"[CONFIG] ffmpeg path: {_ffdir}")
+        break
+
 SCAN_INTERVAL = 30  # Scan every 30 seconds for new projects
 DEFAULT_PARALLEL = 4  # Will be auto-adjusted based on hardware
 
@@ -343,7 +357,14 @@ def set_hardware_info(hardware: dict):
 
 def log(msg: str, level: str = "INFO"):
     timestamp = time.strftime("%H:%M:%S")
-    print(f"[{timestamp}] [{level}] {msg}")
+    line = f"[{timestamp}] [{level}] {msg}"
+    try:
+        print(line)
+    except UnicodeEncodeError:
+        import sys as _sys
+        encoded = (line + "\n").encode('utf-8', errors='replace')
+        _sys.stdout.buffer.write(encoded)
+        _sys.stdout.buffer.flush()
 
 
 def normalize_voice(voice_path: Path, temp_dir: Path) -> Path:
@@ -1043,18 +1064,37 @@ def scan_visual_projects() -> List[Dict]:
 # ============================================================================
 
 def parse_timestamp(timestamp: str) -> float:
-    """Parse SRT timestamp to seconds."""
+    """Parse SRT timestamp (HH:MM:SS,mmm or HH:MM:SS.mmm) to seconds."""
     if not timestamp:
         return 0.0
-    timestamp = timestamp.replace(",", ".")
-    parts = timestamp.split(":")
-    if len(parts) == 3:
-        h, m, s = parts
-        return int(h) * 3600 + int(m) * 60 + float(s)
-    elif len(parts) == 2:
-        m, s = parts
-        return int(m) * 60 + float(s)
-    return float(timestamp) if timestamp else 0.0
+    timestamp = str(timestamp).strip()
+    # Split seconds from milliseconds correctly: SRT uses comma, some use dot
+    ms = 0
+    if ',' in timestamp:
+        ts_part, ms_str = timestamp.rsplit(',', 1)
+        try:
+            ms = int(ms_str)
+        except ValueError:
+            ms = 0
+    elif '.' in timestamp:
+        ts_part, ms_str = timestamp.rsplit('.', 1)
+        try:
+            ms = int(ms_str)
+        except ValueError:
+            ms = 0
+    else:
+        ts_part = timestamp
+    parts = ts_part.split(":")
+    try:
+        if len(parts) == 3:
+            h, m, s = parts
+            return int(h) * 3600 + int(m) * 60 + int(s) + ms / 1000.0
+        elif len(parts) == 2:
+            m, s = parts
+            return int(m) * 60 + int(s) + ms / 1000.0
+        return float(ts_part) + ms / 1000.0
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def process_srt_for_video(srt_path: Path, output_path: Path, max_chars: int = 50) -> Path:
@@ -1376,10 +1416,11 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             channel_template = get_subtitle_template(code)
             channel = code.split("-")[0] if "-" in code else code
 
-            # --- Disclaimer image (2s static at video start) ---
-            DISCLAIMER_DURATION = 2.0
+            # --- Disclaimer image (1s static at video start) ---
+            DISCLAIMER_DURATION = 1.0
             IMAGES_DIR = TOOL_DIR / "images"
             disclaimer_img = None
+            audio_delay_offset = 0.0  # Track audio delay needed for disclaimer sync
             if IMAGES_DIR.exists() and media_items and media_items[0].get('duration', 0) > DISCLAIMER_DURATION + 0.5:
                 # Try channel-specific image: KA2-T2.jpg, KA2-T*.jpg, KA2.jpg
                 for pattern in [f"{channel}-T*.jpg", f"{channel}-T*.png",
@@ -1398,7 +1439,9 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
 
             if disclaimer_img:
                 plog(f"  Disclaimer: {disclaimer_img.name} ({DISCLAIMER_DURATION}s) prepended to video")
-                media_items[0]['duration'] -= DISCLAIMER_DURATION
+                # Prepend disclaimer WITHOUT subtracting from scene 1.
+                # Scene 1 keeps its full srt_dur. Timing is handled via
+                # xfade padding (+T per clip) and abs_desired offsets.
                 media_items.insert(0, {
                     'id': 'disclaimer',
                     'path': str(disclaimer_img),
@@ -1444,6 +1487,18 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             # Determine if using xfade transitions (mix/wipe need xfade filter)
             use_xfade = video_transition in ["mix", "wipe", "random"]
             FADE_DURATION = transition_duration if use_xfade else 0.4
+
+            # FIX: xfade timing compensation via padding.
+            # The xfade filter overlaps adjacent clips by T seconds, so each clip
+            # is consumed T seconds earlier than its duration. By padding each
+            # non-last clip with +T, the effective clip duration matches srt_dur.
+            # Combined with abs_desired offsets below, this places each scene at
+            # exactly its srt_start in the video.
+            if use_xfade:
+                for i, item in enumerate(media_items):
+                    if i < len(media_items) - 1:  # All clips except last get +T
+                        item['duration'] = item['duration'] + FADE_DURATION
+                plog(f"  xfade duration pad: +{FADE_DURATION}s per clip")
 
             # Use cached system resources (detected once at startup)
             resources = get_system_resources()
@@ -1597,11 +1652,9 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                         pass
 
                 if is_video:
-                    # Process VIDEO clip
-                    if worker_kb:
-                        success = worker_kb.process_video_clip(
-                            media_path, clip_path, target_duration, kb_config['output_size']
-                        )
+                    # Process VIDEO clip via FFmpeg (more reliable than OpenCV for trimming)
+                    # OpenCV has duration accuracy issues with mp4v container
+                    success = False  # Always use FFmpeg for videos
 
                     if not success:
                         # Fallback to FFmpeg
@@ -1826,23 +1879,80 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                 # Use xfade filter for smooth transitions
                 # Build xfade filter chain
                 def get_xfade_type(transition_setting):
-                    """Get xfade transition type"""
+                    """
+                    Get xfade transition type.
+                    Presets:
+                      mix       - dissolve only (smoothest)
+                      cinematic - fade/zoom/circle, documentary style
+                      dynamic   - slide/cover/reveal, energetic
+                      soft      - gentle fades only
+                      news      - wipe styles, professional
+                      wipe      - directional wipes
+                      random    - weighted mix of all beautiful transitions
+                    """
                     if transition_setting == "mix":
                         return "dissolve"
+
+                    elif transition_setting == "cinematic":
+                        return random.choice([
+                            "fade", "dissolve", "fadeblack",
+                            "fadeslow", "fadegrays", "distance",
+                            "zoomin", "circleopen",
+                        ])
+
+                    elif transition_setting == "dynamic":
+                        return random.choice([
+                            "slideleft", "slideright", "slideup", "slidedown",
+                            "coverleft", "coverright", "coverup", "coverdown",
+                            "revealleft", "revealright",
+                            "zoomin", "pixelize",
+                        ])
+
+                    elif transition_setting == "soft":
+                        return random.choice([
+                            "fade", "dissolve", "fadeblack", "fadewhite",
+                            "fadeslow", "fadefast", "fadegrays",
+                        ])
+
+                    elif transition_setting == "news":
+                        return random.choice([
+                            "wipeleft", "wiperight", "wipeup", "wipedown",
+                            "wipetl", "wipetr", "wipebl", "wipebr",
+                            "horzopen", "radial",
+                        ])
+
                     elif transition_setting == "wipe":
-                        return random.choice(["wipeleft", "wiperight", "wipeup", "wipedown"])
+                        return random.choice([
+                            "wipeleft", "wiperight", "wipeup", "wipedown",
+                        ])
+
                     elif transition_setting == "random":
-                        # 40% fade_black, 45% mix, 15% wipe
+                        # Weighted: smooth fades most common, variety added
                         r = random.random()
-                        if r < 0.40:
-                            return "fade"  # fade through black
+                        if r < 0.30:
+                            return random.choice(["fade", "dissolve", "fadeblack", "fadegrays"])
+                        elif r < 0.50:
+                            return random.choice(["fadeslow", "fadefast", "zoomin", "distance"])
+                        elif r < 0.70:
+                            return random.choice([
+                                "coverleft", "coverright", "coverup", "coverdown",
+                                "revealleft", "revealright",
+                            ])
                         elif r < 0.85:
-                            return "dissolve"  # crossfade
+                            return random.choice([
+                                "slideleft", "slideright", "slideup", "slidedown",
+                            ])
                         else:
-                            return random.choice(["wipeleft", "wiperight"])
+                            return random.choice([
+                                "circleopen", "horzopen", "radial",
+                                "pixelize", "squeezeh", "squeezev",
+                                "wipeleft", "wiperight",
+                            ])
+
                     return "dissolve"
 
-                def xfade_batch(batch_clips, batch_idx, temp_dir_path):
+
+                def xfade_batch(batch_clips, batch_idx, temp_dir_path, batch_start_index=0):
                     """Process a batch of clips with xfade transitions"""
                     if len(batch_clips) == 1:
                         return batch_clips[0]  # Single clip, no xfade needed
@@ -1868,14 +1978,29 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                     for cp in batch_clips:
                         inputs.extend(["-i", str(cp).replace('\\', '/')])
 
-                    # Build filter_complex
+                    # Build filter_complex using srt_start-based offsets.
+                    # Within-batch offset for clip G (batch position i):
+                    #   = (abs_desired[G] - abs_desired[batch_start]) - transition_duration
+                    # This ensures: scene G fully visible at abs_desired[G] in the BATCH output.
+                    # When batches are concatenated, the batch starts at the right position
+                    # only if clip durations sum correctly, which requires padding.
                     filter_parts = []
-                    current_offset = 0
                     prev_label = "[0]"
 
                     for i in range(1, len(batch_clips)):
                         xfade_type = get_xfade_type(video_transition)
-                        current_offset += batch_durations[i-1] - transition_duration
+                        global_idx = batch_start_index + i
+                        batch_base_global = batch_start_index  # global index of batch's first clip
+
+                        if global_idx in xfade_srt_offsets and batch_base_global in xfade_srt_offsets:
+                            abs_time_G = xfade_srt_offsets[global_idx]      # fully visible abs time
+                            abs_time_B = xfade_srt_offsets[batch_base_global]  # batch start abs time
+                            within_batch_visible = abs_time_G - abs_time_B  # relative to batch start
+                            current_offset = max(0.01, within_batch_visible - transition_duration)
+                        else:
+                            # Fallback: cumulative measured durations
+                            current_offset = max(0.01, sum(batch_durations[:i]) - i * transition_duration)
+
                         out_label = f"[v{i}]" if i < len(batch_clips) - 1 else "[vout]"
                         filter_parts.append(
                             f"{prev_label}[{i}]xfade=transition={xfade_type}:duration={transition_duration}:offset={current_offset:.3f}{out_label}"
@@ -1917,6 +2042,42 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                         plog(f"    xfade batch timed out (1200s)", "WARN")
                         return None
 
+                # Build xfade_srt_offsets: maps clip_index -> xfade offset (in seconds).
+                # Rule: scene N is FULLY VISIBLE at srt_start[N] in the video.
+                # With xfade, transition STARTS at T seconds before full visibility:
+                #   xfade_offset[N] = desired_fully_visible_time[N] - T
+                #
+                # For batch processing: offset is RELATIVE to batch start clip time.
+                # batch_abs_times[i] = absolute video time of clip i's desired appearance.
+                # within_batch_offset[i] = (batch_abs_times[i] - batch_abs_times[B]) - T
+                #
+                # Disclaimer (clip 0) adds D=1s before scene content starts.
+                # Scene 1 (clip 1) is desired fully-visible at absolute t=D.
+                # Scene 2 (clip 2) is desired fully-visible at absolute t=D + srt_start[2].
+                # Scene N (clip N) is desired fully-visible at absolute t=D + srt_start[N].
+
+                D_abs = DISCLAIMER_DURATION if any(it.get('is_disclaimer') for it in media_items) else 0.0
+
+                # Build absolute desired appearance times for ALL clips
+                abs_desired = {}  # global_clip_idx -> absolute video time when scene fully visible
+                for idx, item in enumerate(media_items):
+                    if item.get('is_disclaimer'):
+                        abs_desired[idx] = 0.0  # disclaimer at 0, no transition into it
+                    else:
+                        srt_s = item.get('start', 0.0)
+                        if srt_s < 0:
+                            srt_s = 0.0
+                        abs_desired[idx] = D_abs + srt_s
+
+                # Build xfade_srt_offsets: global_clip_idx -> WITHIN-BATCH transition start time
+                # This is computed per-call in xfade_batch using batch_start_index
+                xfade_srt_offsets = abs_desired  # pass abs times, batch will compute relative
+
+                plog(f"  xfade offsets (srt_start-based): {len(xfade_srt_offsets)} clips")
+                if len(xfade_srt_offsets) >= 3:
+                    sample = [(i, f'{v:.2f}s') for i, v in sorted(abs_desired.items())[:3]]
+                    plog(f"    Abs desired: {sample}")
+
                 # Process in batches to avoid Windows command line length limit
                 BATCH_SIZE = int(os.environ.get("VE3_BATCH_SIZE", 15))
                 xfade_success = False
@@ -1925,7 +2086,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                     # Small video - process all at once
                     plog(f"  Using xfade transitions ({video_transition})...")
                     try:
-                        batch_output = xfade_batch(clip_paths, 0, temp_dir)
+                        batch_output = xfade_batch(clip_paths, 0, temp_dir, batch_start_index=0)
                         if batch_output:
                             shutil.move(str(batch_output), str(temp_video))
                             xfade_success = True
@@ -1942,7 +2103,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                         batch_output = None
                         for attempt in range(2):  # Try up to 2 times
                             try:
-                                batch_output = xfade_batch(batch_clips, batch_idx // BATCH_SIZE, temp_dir)
+                                batch_output = xfade_batch(batch_clips, batch_idx // BATCH_SIZE, temp_dir, batch_start_index=batch_idx)
                             except Exception as e:
                                 plog(f"    Batch {batch_num} attempt {attempt+1} exception: {e}", "WARN")
                                 batch_output = None
@@ -2068,10 +2229,141 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                 else:
                     plog(f"  Last frame extract failed: {ext_r.stderr[-100:]}", "WARN")
 
-            # Add audio
+            # Add audio (voice + optional background music)
             temp_with_audio = Path(temp_dir) / "with_audio.mp4"
             update_progress(code=code, step="Adding audio", percent=85)
-            plog("  Adding voice...")
+
+            # ── Background music logic ────────────────────────────────────────
+            # If project_dir/music/ exists with .mp3 files AND Excel has a 'music'
+            # sheet with start_time data, mix each track at the correct timestamp.
+            # Each track is trimmed so it ends exactly when the next track starts.
+            # Voice stays at 100%; music is blended at MUSIC_VOLUME (18%).
+            MUSIC_VOLUME = 0.20   # 20% ≈ -14 dB (nghe nhẹ music, không lấn át voice)
+            music_dir    = project_dir / "music"
+            music_segments = []  # list of (start_sec, allowed_dur_sec, mp3_path)
+
+            if music_dir.exists() and any(music_dir.glob("*.mp3")):
+                # ── Read timing from Excel 'music' sheet ──────────────────────
+                try:
+                    wb_m = openpyxl.load_workbook(excel_path, read_only=True, data_only=True)
+                    if "music" in wb_m.sheetnames:
+                        ws_m   = wb_m["music"]
+                        m_hdrs = [str(c.value).lower().strip() if c.value else ''
+                                  for c in ws_m[1]]
+                        def _col(name):
+                            return m_hdrs.index(name) if name in m_hdrs else None
+                        col_id     = _col('music_id')
+                        col_start  = _col('start_time')
+                        col_status = _col('status')
+
+                        raw_segs = []
+                        for row in ws_m.iter_rows(min_row=2, values_only=True):
+                            if col_id is None or row[col_id] is None:
+                                continue
+                            status = (str(row[col_status]).lower().strip()
+                                      if col_status is not None and row[col_status]
+                                      else 'pending')
+                            if status == 'skip':
+                                continue
+                            start_s = (parse_timestamp(str(row[col_start]))
+                                       if col_start is not None and row[col_start]
+                                       else 0.0)
+                            try:
+                                mid = str(int(float(str(row[col_id]))))
+                            except Exception:
+                                continue
+                            mp3 = music_dir / f"{mid}.mp3"
+                            if not mp3.exists():
+                                alts = list(music_dir.glob(f"{mid}.*"))
+                                mp3  = alts[0] if alts else None
+                            raw_segs.append({'start': start_s, 'path': mp3})
+
+                        wb_m.close()
+                        raw_segs.sort(key=lambda x: x['start'])
+
+                        for i, seg in enumerate(raw_segs):
+                            if not seg['path'] or not seg['path'].exists():
+                                continue
+                            # Trim track so it ends when next track begins
+                            if i < len(raw_segs) - 1:
+                                allowed = raw_segs[i + 1]['start'] - seg['start']
+                            else:
+                                allowed = total_duration - seg['start']
+                            allowed = max(allowed, 5.0)
+                            music_segments.append((seg['start'], allowed, seg['path']))
+                        plog(f"  Music: {len(music_segments)} tracks (from Excel sheet)")
+                except Exception as _em:
+                    plog(f"  Music sheet read error (skipping music): {_em}", "WARN")
+                    music_segments = []
+
+                # ── Fallback: auto-detect from sorted filenames ───────────────
+                if not music_segments:
+                    mp3s = sorted(music_dir.glob("*.mp3"),
+                                  key=lambda f: (int(f.stem) if f.stem.isdigit() else 999))
+                    n_mp3   = len(mp3s)
+                    seg_dur = total_duration / n_mp3 if n_mp3 > 0 else total_duration
+                    for i, mp3 in enumerate(mp3s):
+                        music_segments.append((i * seg_dur, seg_dur, mp3))
+                    plog(f"  Music: {len(music_segments)} files (auto-spaced, no sheet)")
+
+            # ── Mix music tracks → single music_mix.mp3 ───────────────────────
+            if music_segments:
+                try:
+                    music_mix_path = Path(temp_dir) / "music_mix.mp3"
+                    m_inputs, m_filters, m_labels = [], [], []
+                    for idx, (start_sec, allowed_dur, mp3_path) in enumerate(music_segments):
+                        m_inputs.extend(["-i", str(mp3_path)])
+                        delay_ms = int(start_sec * 1000)
+                        lbl = f"[m{idx}]"
+                        m_filters.append(
+                            f"[{idx}:a]atrim=0:{allowed_dur:.3f},"
+                            f"asetpts=PTS-STARTPTS,"
+                            f"adelay={delay_ms}|{delay_ms}{lbl}"
+                        )
+                        m_labels.append(lbl)
+
+                    n_m = len(m_labels)
+                    m_filters.append(
+                        # normalize=0: sum tracks without dividing (sequential = no clipping)
+                        f"{''.join(m_labels)}amix=inputs={n_m}:duration=longest:normalize=0[mout]"
+                    )
+                    cmd_music = (["ffmpeg", "-y"] + m_inputs + [
+                        "-filter_complex", ";".join(m_filters),
+                        "-map", "[mout]", "-b:a", "192k", str(music_mix_path)
+                    ])
+                    r_m = subprocess.run(cmd_music, capture_output=True, text=True,
+                                         timeout=300, creationflags=SUBPROCESS_FLAGS)
+
+                    if r_m.returncode == 0 and music_mix_path.exists() \
+                            and music_mix_path.stat().st_size > 1000:
+                        # ── Mix voice (100%) + music_mix (MUSIC_VOLUME) ───────
+                        temp_mixed = Path(temp_dir) / "voice_with_music.mp3"
+                        cmd_amix = [
+                            "ffmpeg", "-y",
+                            "-i", str(voice_path),
+                            "-i", str(music_mix_path),
+                            "-filter_complex",
+                            # normalize=0: voice×1.0 + music×MUSIC_VOLUME (no automatic halving)
+                            f"[0:a][1:a]amix=inputs=2:duration=first"
+                            f":weights=1.0 {MUSIC_VOLUME}:normalize=0[aout]",
+                            "-map", "[aout]", "-b:a", "256k", str(temp_mixed)
+                        ]
+                        r_amix = subprocess.run(cmd_amix, capture_output=True, text=True,
+                                                 timeout=600, creationflags=SUBPROCESS_FLAGS)
+                        if r_amix.returncode == 0 and temp_mixed.exists():
+                            voice_path = temp_mixed  # use mixed audio downstream
+                            plog(f"  Voice + music mixed OK "
+                                 f"(voice 100% / music {int(MUSIC_VOLUME*100)}%)")
+                        else:
+                            plog(f"  amix voice+music failed: {r_amix.stderr[-150:]}", "WARN")
+                    else:
+                        plog(f"  Music track build failed "
+                             f"(rc={r_m.returncode}): {r_m.stderr[-200:]}", "WARN")
+                except Exception as _emx:
+                    plog(f"  Music mix error (continuing without music): {_emx}", "WARN")
+            # ─────────────────────────────────────────────────────────────────
+
+            plog("  Adding audio to video...")
             cmd2 = ["ffmpeg", "-y", "-i", str(temp_video), "-i", str(voice_path),
                    "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-shortest", str(temp_with_audio)]
             result = subprocess.run(cmd2, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
