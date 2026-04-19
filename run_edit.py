@@ -2364,8 +2364,19 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             # ─────────────────────────────────────────────────────────────────
 
             plog("  Adding audio to video...")
-            cmd2 = ["ffmpeg", "-y", "-i", str(temp_video), "-i", str(voice_path),
-                   "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-shortest", str(temp_with_audio)]
+            # When disclaimer is prepended (D seconds), delay voice to stay in sync with video scenes.
+            # Without delay: voice starts at t=0 but scene 1 video appears at t=D → audio leads by D.
+            if disclaimer_img:
+                delay_ms = int(DISCLAIMER_DURATION * 1000)
+                cmd2 = ["ffmpeg", "-y", "-i", str(temp_video), "-i", str(voice_path),
+                        "-filter_complex",
+                        f"[1:a]adelay={delay_ms}|{delay_ms}[adelayed]",
+                        "-map", "0:v", "-map", "[adelayed]",
+                        "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-shortest", str(temp_with_audio)]
+                plog(f"  Audio delayed {DISCLAIMER_DURATION}s to sync with disclaimer")
+            else:
+                cmd2 = ["ffmpeg", "-y", "-i", str(temp_video), "-i", str(voice_path),
+                       "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-shortest", str(temp_with_audio)]
             result = subprocess.run(cmd2, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
             if result.returncode != 0:
                 return False, None, f"Audio merge error: {result.stderr[-200:]}"
