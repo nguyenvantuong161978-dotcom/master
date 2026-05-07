@@ -3938,7 +3938,7 @@ def delete_visual_project(project_info: Dict, callback=None) -> bool:
 
 
 def archive_project_music(project_info: Dict, callback=None) -> bool:
-    """Archive VISUAL/<code>/music before source cleanup deletes the project."""
+    """Copy reusable mp3 music into TOOL_DIR/music before cleanup."""
     code = project_info["code"]
     project_dir = project_info["path"]
     music_dir = project_dir / "music"
@@ -3952,41 +3952,25 @@ def archive_project_music(project_info: Dict, callback=None) -> bool:
     if not music_dir.exists() or not music_dir.is_dir():
         return True
 
-    music_files = [p for p in music_dir.rglob("*") if p.is_file()]
+    music_files = [p for p in music_dir.rglob("*.mp3") if p.is_file()]
     if not music_files:
         return True
 
     try:
         MUSIC_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-        code_archive = MUSIC_ARCHIVE_DIR / code
-        dst_dir = code_archive / "music"
-        if dst_dir.exists():
-            stamp = time.strftime("%Y%m%d_%H%M%S")
-            dst_dir = code_archive / f"music_{stamp}"
-
-        shutil.copytree(music_dir, dst_dir)
-
-        manifest = {
-            "code": code,
-            "source": str(music_dir),
-            "archived_to": str(dst_dir),
-            "archived_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "file_count": len(music_files),
-            "files": [
-                {
-                    "path": str(p.relative_to(music_dir)).replace("\\", "/"),
-                    "size": p.stat().st_size,
-                }
-                for p in music_files
-            ],
-        }
-        (dst_dir.parent / f"{dst_dir.name}_manifest.json").write_text(
-            json.dumps(manifest, indent=2, ensure_ascii=False),
-            encoding="utf-8"
-        )
+        copied = 0
+        for src in music_files:
+            rel = src.relative_to(music_dir)
+            rel_stem = "_".join(rel.with_suffix("").parts)
+            dst = MUSIC_ARCHIVE_DIR / f"{code}_{rel_stem}.mp3"
+            if dst.exists():
+                stamp = time.strftime("%Y%m%d_%H%M%S")
+                dst = MUSIC_ARCHIVE_DIR / f"{code}_{rel_stem}_{stamp}.mp3"
+            shutil.copy2(src, dst)
+            copied += 1
 
         total_mb = sum(p.stat().st_size for p in music_files) / (1024 * 1024)
-        plog(f"Archived music: {len(music_files)} files, {total_mb:.1f} MB -> {dst_dir}")
+        plog(f"Archived music: {copied} mp3 files, {total_mb:.1f} MB -> {MUSIC_ARCHIVE_DIR}")
         return True
     except Exception as e:
         plog(f"Cannot archive music folder: {e}", "WARN")
