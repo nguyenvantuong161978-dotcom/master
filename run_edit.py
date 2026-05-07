@@ -58,6 +58,7 @@ except ImportError:
 TOOL_DIR = Path(__file__).parent
 VISUAL_DIR = Path(r"D:\AUTO\VISUAL")
 DONE_DIR = Path(r"D:\AUTO\done")
+MUSIC_ARCHIVE_DIR = Path(r"D:\AUTO\music_archive")
 THUMB_DIR = Path(r"D:\AUTO\thumbnails")
 VOICE_DIR = Path(r"D:\AUTO\voice")  # Voice source folder
 PROJECTS_DIR = Path(r"D:\VE3_SUITE\PROJECTS")  # SRT projects folder
@@ -3936,6 +3937,62 @@ def delete_visual_project(project_info: Dict, callback=None) -> bool:
         return False
 
 
+def archive_project_music(project_info: Dict, callback=None) -> bool:
+    """Archive VISUAL/<code>/music before source cleanup deletes the project."""
+    code = project_info["code"]
+    project_dir = project_info["path"]
+    music_dir = project_dir / "music"
+
+    def plog(msg, level="INFO"):
+        if callback:
+            callback(msg, level)
+        else:
+            log(f"[{code}] {msg}", level)
+
+    if not music_dir.exists() or not music_dir.is_dir():
+        return True
+
+    music_files = [p for p in music_dir.rglob("*") if p.is_file()]
+    if not music_files:
+        return True
+
+    try:
+        MUSIC_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        code_archive = MUSIC_ARCHIVE_DIR / code
+        dst_dir = code_archive / "music"
+        if dst_dir.exists():
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            dst_dir = code_archive / f"music_{stamp}"
+
+        shutil.copytree(music_dir, dst_dir)
+
+        manifest = {
+            "code": code,
+            "source": str(music_dir),
+            "archived_to": str(dst_dir),
+            "archived_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "file_count": len(music_files),
+            "files": [
+                {
+                    "path": str(p.relative_to(music_dir)).replace("\\", "/"),
+                    "size": p.stat().st_size,
+                }
+                for p in music_files
+            ],
+        }
+        (dst_dir.parent / f"{dst_dir.name}_manifest.json").write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False),
+            encoding="utf-8"
+        )
+
+        total_mb = sum(p.stat().st_size for p in music_files) / (1024 * 1024)
+        plog(f"Archived music: {len(music_files)} files, {total_mb:.1f} MB -> {dst_dir}")
+        return True
+    except Exception as e:
+        plog(f"Cannot archive music folder: {e}", "WARN")
+        return False
+
+
 def cleanup_source_data(code: str, callback=None, max_retries: int = 3) -> bool:
     """Clean up source data after video is complete.
 
@@ -4368,6 +4425,9 @@ def process_project(project_info: Dict, callback=None) -> bool:
             plog(f"Sheet update failed for {code}. Video done nhưng chưa điền Sheet.", "ERROR")
             # Still return True because video is done, but don't cleanup
             return True
+
+        # Keep reusable background music before VISUAL/<code> is deleted.
+        archive_project_music(project_info, callback)
 
         # Clean up source data (voice folder + PROJECTS folder) ONLY after sheet is updated
         cleanup_source_data(code, callback)
