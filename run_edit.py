@@ -17,6 +17,7 @@ import time
 import shutil
 import json
 import re
+import unicodedata
 import subprocess
 import argparse
 import random
@@ -29,6 +30,11 @@ import queue as _queue_module
 import concurrent.futures as _cf
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from enum import Enum
+
+try:
+    from fontTools.ttLib import TTFont
+except Exception:
+    TTFont = None
 
 # For hardware detection
 try:
@@ -54,7 +60,7 @@ VISUAL_DIR = Path(r"D:\AUTO\VISUAL")
 DONE_DIR = Path(r"D:\AUTO\done")
 THUMB_DIR = Path(r"D:\AUTO\thumbnails")
 VOICE_DIR = Path(r"D:\AUTO\voice")  # Voice source folder
-PROJECTS_DIR = TOOL_DIR / "PROJECTS"  # SRT projects folder
+PROJECTS_DIR = Path(r"D:\VE3_SUITE\PROJECTS")  # SRT projects folder
 CONFIG_FILE = TOOL_DIR / "config" / "config.json"
 PROGRESS_FILE = TOOL_DIR / "progress.json"
 
@@ -367,63 +373,130 @@ def log(msg: str, level: str = "INFO"):
         _sys.stdout.buffer.flush()
 
 
-def normalize_voice(voice_path: Path, temp_dir: Path) -> Path:
-    """
-    2-pass loudnorm (EBU R128, -14 LUFS YouTube standard) + dynaudnorm
-    để xử lý file voice ghép từ nhiều clip nhỏ có loudness không đều.
-    Returns: path to normalized file (temp), hoặc voice_path gốc nếu fail.
-    """
-    out_path = temp_dir / f"voice_norm_{voice_path.stem}.mp3"
+VOICE_TARGET_LUFS = -14.0
+VOICE_TRUE_PEAK = -1.5
+VOICE_TARGET_LRA = 7.0
 
-    # Pass 1: đo loudness thực tế của file
-    cmd1 = [
-        "ffmpeg", "-y", "-i", str(voice_path),
-        "-af", "loudnorm=I=-14:TP=-1:LRA=11:print_format=json",
-        "-f", "null", "-"
-    ]
-    r1 = subprocess.run(cmd1, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
 
-    # Parse JSON stats từ stderr
-    import re as _re
-    json_match = _re.search(r'\{[^\{\}]+\}', r1.stderr, _re.DOTALL)
-    if json_match:
+def _extract_loudnorm_json(stderr: str) -> Optional[dict]:
+    match = re.search(r"\{[\s\S]*?\}", stderr or "")
+    if not match:
+        return None
+    try:
+        return json.loads(match.group())
+    except Exception:
+        return None
+
+
+def measure_audio_loudness(audio_path: Path, dual_mono: bool = True, pre_filter: str = "") -> Optional[dict]:
+    """Measure integrated loudness/true peak using FFmpeg loudnorm JSON output."""
+    loudnorm = (
+        f"loudnorm=I={VOICE_TARGET_LUFS}:TP={VOICE_TRUE_PEAK}:LRA={VOICE_TARGET_LRA}"
+        f":dual_mono={'true' if dual_mono else 'false'}:print_format=json"
+    )
+    af = f"{pre_filter},{loudnorm}" if pre_filter else loudnorm
+    cmd = ["ffmpeg", "-hide_banner", "-nostats", "-i", str(audio_path), "-af", af, "-f", "null", "-"]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=900,
+            creationflags=SUBPROCESS_FLAGS
+        )
+    except Exception:
+        return None
+    stats = _extract_loudnorm_json(result.stderr)
+    if stats is not None:
+        stats["returncode"] = result.returncode
+    return stats
+
+
+def _voice_pre_filter() -> str:
+    # Mild speech cleanup + local leveling before the final LUFS pass.
+    return (
+        "highpass=f=70,"
+        "lowpass=f=14500,"
+        "dynaudnorm=f=750:g=15:p=0.90:m=8:s=6:t=0.02"
+    )
+
+
+def normalize_voice(voice_path: Path, temp_dir: Path, label: str = "voice") -> Path:
+    """
+    Speech-first mastering for ElevenLabs voice.
+
+    Order matters: local leveling/filtering first, then 2-pass loudnorm last.
+    This keeps merged chunks even while preserving final YouTube-ready LUFS/true peak.
+    """
+    out_path = temp_dir / f"{label}_norm_{voice_path.stem}.mp3"
+    report_path = temp_dir / f"{label}_audio_report_{voice_path.stem}.json"
+    pre_filter = _voice_pre_filter()
+
+    before_stats = measure_audio_loudness(voice_path, dual_mono=False)
+    measured = measure_audio_loudness(voice_path, dual_mono=False, pre_filter=pre_filter)
+    if not measured:
+        log(f"Audio measure failed for {voice_path.name}; trying fallback leveling", "WARN")
+    else:
         try:
-            stats = json.loads(json_match.group())
-            # Pass 2: normalize chính xác với measured values + dynaudnorm cho biến động cục bộ
             af = (
-                f"loudnorm=I=-14:TP=-1:LRA=11"
-                f":measured_I={stats['input_i']}"
-                f":measured_TP={stats['input_tp']}"
-                f":measured_LRA={stats['input_lra']}"
-                f":measured_thresh={stats['input_thresh']}"
-                f":offset={stats['target_offset']}"
-                f":linear=true"
-                f",dynaudnorm=f=500:g=31:p=0.95:m=10"
+                f"{pre_filter},"
+                f"loudnorm=I={VOICE_TARGET_LUFS}:TP={VOICE_TRUE_PEAK}:LRA={VOICE_TARGET_LRA}"
+                f":dual_mono=false"
+                f":measured_I={measured['input_i']}"
+                f":measured_TP={measured['input_tp']}"
+                f":measured_LRA={measured['input_lra']}"
+                f":measured_thresh={measured['input_thresh']}"
+                f":offset={measured['target_offset']}"
+                f":linear=false"
             )
-            cmd2 = [
-                "ffmpeg", "-y", "-i", str(voice_path),
-                "-af", af,
-                "-ar", "44100", "-ac", "2", "-b:a", "256k",
+            cmd = [
+                "ffmpeg", "-y", "-hide_banner", "-nostats", "-i", str(voice_path),
+                "-af", af, "-ar", "44100", "-ac", "2", "-b:a", "256k",
                 str(out_path)
             ]
-            r2 = subprocess.run(cmd2, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
-            if r2.returncode == 0 and out_path.exists():
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=900,
+                creationflags=SUBPROCESS_FLAGS
+            )
+            if result.returncode == 0 and out_path.exists() and out_path.stat().st_size > 1000:
+                after_stats = measure_audio_loudness(out_path, dual_mono=False)
+                try:
+                    report = {
+                        "source": str(voice_path),
+                        "output": str(out_path),
+                        "target_lufs": VOICE_TARGET_LUFS,
+                        "target_true_peak": VOICE_TRUE_PEAK,
+                        "target_lra": VOICE_TARGET_LRA,
+                        "before": before_stats,
+                        "measured_after_prefilter": measured,
+                        "after": after_stats,
+                    }
+                    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+                except Exception:
+                    pass
+                if after_stats:
+                    log(
+                        f"Audio mastered {voice_path.name}: "
+                        f"I={after_stats.get('input_i')} LUFS, "
+                        f"TP={after_stats.get('input_tp')} dBTP, "
+                        f"LRA={after_stats.get('input_lra')}"
+                    )
                 return out_path
-        except Exception:
-            pass
+            log(f"Audio normalize failed: {result.stderr[-220:]}", "WARN")
+        except Exception as exc:
+            log(f"Audio normalize error: {exc}", "WARN")
 
-    # Fallback: chỉ dùng dynaudnorm nếu pass 1 fail
+    # Fallback keeps speech intelligible even if 2-pass loudnorm cannot parse stats.
     cmd_fb = [
-        "ffmpeg", "-y", "-i", str(voice_path),
-        "-af", "dynaudnorm=f=500:g=31:p=0.95:m=10",
+        "ffmpeg", "-y", "-hide_banner", "-nostats", "-i", str(voice_path),
+        "-af", f"{pre_filter},alimiter=limit=0.841:level=false",
         "-ar", "44100", "-ac", "2", "-b:a", "256k",
         str(out_path)
     ]
-    r_fb = subprocess.run(cmd_fb, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
-    if r_fb.returncode == 0 and out_path.exists():
+    result_fb = subprocess.run(
+        cmd_fb, capture_output=True, text=True, timeout=900,
+        creationflags=SUBPROCESS_FLAGS
+    )
+    if result_fb.returncode == 0 and out_path.exists() and out_path.stat().st_size > 1000:
         return out_path
 
-    # Nếu tất cả fail, dùng file gốc
     return voice_path
 
 
@@ -449,7 +522,7 @@ SUBTITLE_TEMPLATES_FILE = TOOL_DIR / "subtitle_templates.json"
 
 # Default template (used when no channel-specific template exists)
 DEFAULT_SUBTITLE_TEMPLATE = {
-    "font": "Bebas Neue",
+    "font": "Auto",
     "size": 28,
     "color": "&H00FFFFFF",      # White (ABGR format)
     "outline": "&H00000000",    # Black outline
@@ -461,27 +534,150 @@ DEFAULT_SUBTITLE_TEMPLATE = {
     "compose_mode": "quality",
     "ken_burns_intensity": "subtle",
     "video_transition": "random",
+    # Subtitle timing sync target:
+    # - "voice" (default): keep subtitle aligned with spoken audio
+    # - "video": compensate subtitle timestamps for xfade timeline compression
+    "subtitle_sync": "voice",
     # NV overlay settings
     "nv_overlay_enabled": False,
     "nv_overlay_position": "left",
     "nv_overlay_v_position": "middle",
     "nv_overlay_scale": 0.50,
     "nv_crop_ratio": 0.5,  # Crop right portion (0.5 = right half, 1.0 = full image)
+    # Remove Veo watermark on source videos via minimal corner crop (before upscale)
+    "veo_crop_enabled": True,
+    "veo_crop_right_ratio": 0.05,
+    "veo_crop_bottom_ratio": 0.07,
+    "veo_crop_min_right_px": 56,
+    "veo_crop_min_bottom_px": 48,
+    "veo_crop_keep_4k_aspect": True,
 }
 
 # Available fonts in fonts/ folder
 AVAILABLE_FONTS = [
+    "Auto",
     "Bebas Neue",
-    "Inter Bold",
+    "Oswald",
+    "Roboto Condensed",
+    "Noto Sans Condensed",
+    "Noto Sans",
     "Noto Serif",
+    "Inter",
+    "Inter 18pt",
     "Anton",
     "League Spartan ExtraBold",
-    "Montserrat",
-    "Nunito",
-    "Roboto Condensed",
-    "UTM Avo Bold",
+    "Montserrat Thin",
+    "Nunito ExtraLight",
+    "Roboto Condensed Black",
+    "UTM Avo",
     "Zuume SemiBold"
 ]
+
+# Font names must match the internal family name that libass sees, not only the
+# .ttf file name shown in Explorer. Keep common GUI/file-name aliases here.
+SUBTITLE_FONT_ALIASES = {
+    "auto": "Auto",
+    "smart": "Auto",
+    "tu dong": "Auto",
+    "tự động": "Auto",
+    "bebasneue": "Bebas Neue",
+    "bebasneue regular": "Bebas Neue",
+    "bebas neue": "Bebas Neue",
+    "bebas neue regular": "Bebas Neue",
+    "notoserif": "Noto Serif",
+    "notoserif regular": "Noto Serif",
+    "noto serif": "Noto Serif",
+    "noto serif regular": "Noto Serif",
+    "notosans": "Noto Sans",
+    "notosans regular": "Noto Sans",
+    "noto sans": "Noto Sans",
+    "noto sans regular": "Noto Sans",
+    "notosans bold": "Noto Sans",
+    "noto sans bold": "Noto Sans",
+    "notosans condensedbold": "Noto Sans Condensed",
+    "notosans condensed bold": "Noto Sans Condensed",
+    "noto sans condensed": "Noto Sans Condensed",
+    "noto sans condensed bold": "Noto Sans Condensed",
+    "inter": "Inter",
+    "inter bold": "Inter 18pt",
+    "inter 18pt": "Inter 18pt",
+    "anton": "Anton",
+    "league spartan": "League Spartan ExtraBold",
+    "league spartan extrabold": "League Spartan ExtraBold",
+    "montserrat": "Montserrat Thin",
+    "nunito": "Nunito ExtraLight",
+    "oswald": "Oswald",
+    "oswald wght": "Oswald",
+    "roboto condensed": "Roboto Condensed",
+    "roboto condensed regular": "Roboto Condensed",
+    "robotocondensed": "Roboto Condensed",
+    "robotocondensed regular": "Roboto Condensed",
+    "robotocondensed wght": "Roboto Condensed",
+    "roboto condensed black": "Roboto Condensed Black",
+    "utm avo": "UTM Avo",
+    "utm avo bold": "UTM Avo",
+    "utm-avobold": "UTM Avo",
+    "ut mavobold": "UTM Avo",
+    "zuume semibold": "Zuume SemiBold",
+}
+
+SUBTITLE_SMART_FONT_PRIORITY = [
+    "Bebas Neue",
+    "Oswald",
+    "Roboto Condensed",
+    "Noto Sans Condensed",
+    "Anton",
+    "Noto Sans",
+    "Noto Serif",
+    "Inter",
+    "Inter 18pt",
+    "Nunito ExtraLight",
+    "Montserrat Thin",
+    "Roboto Condensed Black",
+    "UTM Avo",
+    "Arial",
+]
+
+SUBTITLE_LANGUAGE_FONT_PROFILES = {
+    # Keep the strong, clear YouTube-subtitle look first; fallback fonts are
+    # chosen for complete Latin Extended coverage.
+    "vi": ["Bebas Neue", "Oswald", "Roboto Condensed", "Noto Sans Condensed", "UTM Avo", "Noto Sans", "Inter 18pt"],
+    "es": ["Bebas Neue", "Oswald", "Roboto Condensed", "Noto Sans Condensed", "Anton", "Noto Sans", "Inter 18pt"],
+    "en": ["Bebas Neue", "Anton", "Oswald", "Roboto Condensed", "Noto Sans Condensed", "Inter 18pt", "Noto Sans"],
+    "fr": ["Bebas Neue", "Oswald", "Roboto Condensed", "Noto Sans Condensed", "Noto Sans", "Inter 18pt", "Noto Serif"],
+    "de": ["Bebas Neue", "Oswald", "Roboto Condensed", "Noto Sans Condensed", "Noto Sans", "Inter 18pt", "Noto Serif"],
+    "pt": ["Bebas Neue", "Oswald", "Roboto Condensed", "Noto Sans Condensed", "Noto Sans", "Inter 18pt", "Noto Serif"],
+    "latin": SUBTITLE_SMART_FONT_PRIORITY,
+}
+
+SUBTITLE_RENDER_PROFILES = {
+    "UTM Avo": {
+        "size_scale": 0.60,
+        "max_chars": 72,
+        "outline_scale": 0.55,
+        "margin_v_delta": 8,
+    },
+    "Oswald": {
+        "size_scale": 0.72,
+        "max_chars": 72,
+        "outline_scale": 0.65,
+        "margin_v_delta": 6,
+    },
+    "Roboto Condensed": {
+        "size_scale": 0.90,
+        "max_chars": 38,
+        "outline_scale": 1.00,
+        "margin_v_delta": 6,
+    },
+    "Noto Sans Condensed": {
+        "size_scale": 0.90,
+        "max_chars": 38,
+        "outline_scale": 1.00,
+        "margin_v_delta": 6,
+    },
+}
+
+_FONT_SCAN_CACHE = None
 
 # Alignment options: 1=left, 2=center, 3=right (bottom row)
 # 4=left, 5=center, 6=right (middle row)
@@ -555,6 +751,223 @@ def get_all_templates() -> Dict:
     return load_subtitle_templates()
 
 
+def resolve_subtitle_font(font_name: str) -> str:
+    """Return a libass-friendly font family name."""
+    raw = str(font_name or "").strip()
+    key = raw.lower().replace("_", " ").replace("-", " ")
+    key = re.sub(r"\s+", " ", key).strip()
+    compact_key = key.replace(" ", "")
+    return SUBTITLE_FONT_ALIASES.get(key) or SUBTITLE_FONT_ALIASES.get(compact_key) or raw or "Noto Serif"
+
+
+def subtitle_required_codepoints(text: str) -> Set[int]:
+    """Codepoints that a subtitle font must render."""
+    required = set()
+    for ch in text or "":
+        if ch.isspace() or unicodedata.category(ch).startswith("C"):
+            continue
+        required.add(ord(ch))
+    return required
+
+
+def scan_subtitle_font_files() -> Dict[str, Dict]:
+    """Scan fonts/ and cache internal family names plus glyph coverage."""
+    global _FONT_SCAN_CACHE
+    if _FONT_SCAN_CACHE is not None:
+        return _FONT_SCAN_CACHE
+
+    fonts = {}
+    if TTFont is None:
+        _FONT_SCAN_CACHE = fonts
+        return fonts
+
+    fonts_dir = TOOL_DIR / "fonts"
+    if not fonts_dir.exists():
+        _FONT_SCAN_CACHE = fonts
+        return fonts
+
+    for path in fonts_dir.glob("*.ttf"):
+        try:
+            font = TTFont(path)
+            names = set()
+            for record in font["name"].names:
+                if record.nameID in (1, 4, 6):
+                    try:
+                        value = record.toUnicode().strip()
+                    except Exception:
+                        continue
+                    if value:
+                        names.add(value)
+
+            coverage = set()
+            for table in font["cmap"].tables:
+                coverage.update(table.cmap.keys())
+
+            aliases = {path.stem}
+            for name in names:
+                aliases.add(name)
+                aliases.add(resolve_subtitle_font(name))
+            aliases.add(resolve_subtitle_font(path.stem))
+
+            for alias in aliases:
+                resolved = resolve_subtitle_font(alias)
+                if not resolved or resolved == "Auto":
+                    continue
+                fonts.setdefault(resolved, {
+                    "path": path,
+                    "coverage": coverage,
+                    "names": sorted(names),
+                })
+        except Exception as e:
+            log(f"Could not inspect font {path.name}: {e}", "WARN")
+
+    _FONT_SCAN_CACHE = fonts
+    return fonts
+
+
+def font_supports_codepoints(font_name: str, codepoints: Set[int]) -> bool:
+    """True when a local font covers all required subtitle glyphs."""
+    if not codepoints:
+        return True
+    fonts = scan_subtitle_font_files()
+    info = fonts.get(resolve_subtitle_font(font_name))
+    if not info:
+        return False
+    return codepoints.issubset(info["coverage"])
+
+
+def detect_subtitle_language(text: str) -> str:
+    """Detect the main Latin-script subtitle language for font profiling."""
+    sample = unicodedata.normalize("NFC", text or "").lower()
+    words = re.findall(r"[a-zà-ỹñçäöüßœæ]+", sample, flags=re.IGNORECASE)
+    word_set = set(words)
+
+    scores = {
+        "vi": 0,
+        "es": 0,
+        "fr": 0,
+        "de": 0,
+        "pt": 0,
+        "en": 0,
+    }
+
+    vi_chars = set("ăâđêôơưạảãáàắằẳẵặấầẩẫậẹẻẽéèếềểễệịỉĩíìọỏõóòốồổỗộớờởỡợụủũúùứừửữựỵỷỹýỳ")
+    es_chars = set("¿¡ñ")
+    de_chars = set("ßäöü")
+    pt_chars = set("ãõ")
+    fr_chars = set("œæêëîïûùç")
+
+    scores["vi"] += min(12, sum(1 for ch in sample if ch in vi_chars))
+    scores["es"] += 6 if any(ch in sample for ch in es_chars) else 0
+    scores["de"] += min(10, sum(2 for ch in sample if ch in de_chars))
+    scores["pt"] += min(10, sum(3 for ch in sample if ch in pt_chars))
+    scores["fr"] += min(8, sum(2 for ch in sample if ch in fr_chars))
+
+    keyword_sets = {
+        "vi": {"và", "của", "là", "không", "người", "một", "tôi", "bạn", "này", "đó"},
+        "es": {"el", "la", "los", "las", "que", "de", "para", "con", "una", "por", "es"},
+        "fr": {"le", "la", "les", "des", "que", "pour", "avec", "une", "est", "dans", "pas"},
+        "de": {"der", "die", "das", "und", "ist", "nicht", "mit", "für", "ein", "eine", "ich"},
+        "pt": {"que", "não", "uma", "para", "com", "por", "está", "você", "mais", "como"},
+        "en": {"the", "and", "you", "that", "with", "this", "not", "are", "for", "have"},
+    }
+    for lang, keywords in keyword_sets.items():
+        scores[lang] += len(word_set & keywords)
+
+    lang, score = max(scores.items(), key=lambda item: item[1])
+    return lang if score > 0 else "latin"
+
+
+def choose_subtitle_font(font_name: str, subtitle_text: str) -> str:
+    """Choose a subtitle font that can render every glyph in the SRT."""
+    requested = resolve_subtitle_font(font_name)
+    required = subtitle_required_codepoints(subtitle_text)
+
+    if requested != "Auto" and font_supports_codepoints(requested, required):
+        return requested
+
+    detected_language = detect_subtitle_language(subtitle_text)
+    profile = SUBTITLE_LANGUAGE_FONT_PROFILES.get(detected_language, SUBTITLE_SMART_FONT_PRIORITY)
+    for candidate in profile:
+        if font_supports_codepoints(candidate, required):
+            return candidate
+
+    for candidate in SUBTITLE_SMART_FONT_PRIORITY:
+        if font_supports_codepoints(candidate, required):
+            return candidate
+
+    return "Noto Sans" if requested == "Auto" else requested
+
+
+def get_subtitle_render_profile(font_name: str, detected_language: str) -> Dict:
+    """Return sizing/wrapping adjustments for fonts with wider glyph metrics."""
+    profile = {
+        "size_scale": 1.0,
+        "max_chars": 45,
+        "outline_scale": 1.0,
+        "margin_v_delta": 0,
+    }
+    font_profile = SUBTITLE_RENDER_PROFILES.get(resolve_subtitle_font(font_name), {})
+    profile.update(font_profile)
+    if detected_language == "vi":
+        profile["max_chars"] = min(profile["max_chars"], 72)
+    return profile
+
+
+def subtitle_style_numbers(template: Dict, font_name: str, detected_language: str) -> Tuple[int, int, int]:
+    """Compute ASS style numbers after font/language-specific adjustments."""
+    profile = get_subtitle_render_profile(font_name, detected_language)
+    base_size = max(10, _to_int(template.get("size", 28), 28))
+    base_outline = max(0, _to_int(template.get("outline_size", 2), 2))
+    base_margin = max(0, _to_int(template.get("margin_v", 25), 25))
+    font_size = max(16, int(round(base_size * profile["size_scale"])))
+    outline_size = max(1, int(round(base_outline * profile["outline_scale"]))) if base_outline > 0 else 0
+    margin_v = max(0, base_margin + int(profile["margin_v_delta"]))
+    return font_size, outline_size, margin_v
+
+
+def escape_ass_style_value(value) -> str:
+    """Keep force_style values from breaking the subtitles filter syntax."""
+    return str(value).replace(",", " ").replace("'", "").strip()
+
+
+def read_text_best_effort(path: Path) -> str:
+    """Read subtitle text even when the source file is not UTF-8."""
+    data = path.read_bytes()
+    for enc in ("utf-8-sig", "utf-8", "utf-16", "cp1258", "cp1252"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def normalize_srt_utf8(srt_path: Path, output_path: Path) -> Path:
+    """Write an UTF-8 SRT copy for ffmpeg/libass."""
+    try:
+        text = read_text_best_effort(srt_path)
+        text = unicodedata.normalize("NFC", text).replace("\r\n", "\n").replace("\r", "\n")
+        output_path.write_text(text, encoding="utf-8")
+        return output_path
+    except Exception as e:
+        log(f"Could not normalize SRT encoding: {e}", "WARN")
+        return srt_path
+
+
+def srt_has_cues(srt_path: Path) -> bool:
+    """True when an SRT file is non-empty and contains at least one timestamp cue."""
+    try:
+        if not srt_path.exists() or srt_path.stat().st_size == 0:
+            return False
+        text = read_text_best_effort(srt_path)
+        return bool(re.search(
+            r"\d{2}:\d{2}:\d{2}[,\.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,\.]\d{3}",
+            text
+        ))
+    except Exception:
+        return False
+
+
 def normalize_code(code: str) -> str:
     if not code:
         return ""
@@ -562,6 +975,118 @@ def normalize_code(code: str) -> str:
     s = s.replace("–", "-").replace("—", "-").replace("−", "-")
     s = re.sub(r"\s+", " ", s).strip()
     return s.upper()
+
+
+def _to_bool(v, default=False) -> bool:
+    """Safe bool conversion for template values."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    if v is None:
+        return default
+    return bool(v)
+
+
+def _to_float(v, default: float) -> float:
+    try:
+        return float(v)
+    except Exception:
+        return float(default)
+
+
+def _to_int(v, default: int) -> int:
+    try:
+        return int(v)
+    except Exception:
+        return int(default)
+
+
+def compute_veo_crop_geometry(src_w: int, src_h: int, target_w: int, target_h: int,
+                              right_ratio: float = 0.03, bottom_ratio: float = 0.02,
+                              min_right_px: int = 28, min_bottom_px: int = 12,
+                              keep_target_aspect: bool = True) -> Optional[Dict[str, int]]:
+    """
+    Compute minimal crop from right-bottom corner to remove Veo watermark.
+
+    Returns:
+        dict with crop_w/crop_h/crop_x/crop_y/right_crop/bottom_crop
+        or None when geometry is invalid.
+    """
+    try:
+        src_w = int(src_w)
+        src_h = int(src_h)
+        target_w = int(target_w)
+        target_h = int(target_h)
+    except Exception:
+        return None
+
+    if src_w < 16 or src_h < 16:
+        return None
+
+    right_ratio = max(0.0, float(right_ratio))
+    bottom_ratio = max(0.0, float(bottom_ratio))
+    min_right_px = max(2, int(min_right_px))
+    min_bottom_px = max(2, int(min_bottom_px))
+
+    req_right = max(min_right_px, int(round(src_w * right_ratio)))
+    req_bottom = max(min_bottom_px, int(round(src_h * bottom_ratio)))
+
+    # Keep a safety margin so crop size stays valid
+    req_right = min(req_right, max(2, src_w - 8))
+    req_bottom = min(req_bottom, max(2, src_h - 8))
+
+    # Minimal crop first: just remove watermark area from right-bottom corner
+    crop_w = max(8, (src_w - req_right) - ((src_w - req_right) % 2))
+    crop_h = max(8, (src_h - req_bottom) - ((src_h - req_bottom) % 2))
+
+    if keep_target_aspect and target_w > 0 and target_h > 0:
+        aspect = target_w / target_h
+        base_area = crop_w * crop_h
+        if base_area > 0:
+            # Candidate A: additional crop on width to match target aspect
+            cand_w = int(crop_h * aspect)
+            cand_w = max(8, cand_w - (cand_w % 2))
+            if cand_w > crop_w:
+                cand_w = crop_w
+            area_a = cand_w * crop_h
+
+            # Candidate B: additional crop on height to match target aspect
+            cand_h = int(crop_w / aspect)
+            cand_h = max(8, cand_h - (cand_h % 2))
+            if cand_h > crop_h:
+                cand_h = crop_h
+            area_b = crop_w * cand_h
+
+            # Keep the option with less extra crop (larger kept area)
+            if area_a >= area_b:
+                adj_w, adj_h, adj_area = cand_w, crop_h, area_a
+            else:
+                adj_w, adj_h, adj_area = crop_w, cand_h, area_b
+
+            # Always enforce target aspect to avoid padding/letterbox later.
+            # Choose the option that keeps more image area.
+            crop_w, crop_h = adj_w, adj_h
+
+    crop_w = min(crop_w, src_w - 2)
+    crop_h = min(crop_h, src_h - 2)
+
+    if crop_w <= 0 or crop_h <= 0:
+        return None
+
+    right_crop = src_w - crop_w
+    bottom_crop = src_h - crop_h
+    if right_crop < 1 or bottom_crop < 1:
+        return None
+
+    return {
+        "crop_w": int(crop_w),
+        "crop_h": int(crop_h),
+        "crop_x": 0,
+        "crop_y": 0,
+        "right_crop": int(right_crop),
+        "bottom_crop": int(bottom_crop),
+    }
 
 
 # ============================================================================
@@ -937,10 +1462,10 @@ def get_project_info(project_dir: Path) -> Dict:
     audio_path = project_dir / f"{code}.mp3"
     excel_path = project_dir / f"{code}_prompts.xlsx"
 
-    info["has_srt"] = srt_path.exists()
+    info["has_srt"] = srt_has_cues(srt_path)
     info["has_audio"] = audio_path.exists()
     info["has_excel"] = excel_path.exists()
-    info["srt_path"] = srt_path if srt_path.exists() else None
+    info["srt_path"] = srt_path if info["has_srt"] else None
     info["audio_path"] = audio_path if audio_path.exists() else None
     info["excel_path"] = excel_path if excel_path.exists() else None
 
@@ -967,8 +1492,8 @@ def get_project_info(project_dir: Path) -> Dict:
 
     done_dir = DONE_DIR / code
     if done_dir.exists():
-        mp4_files = list(done_dir.glob("*.mp4"))
-        info["already_done"] = len(mp4_files) > 0
+        ok, _missing = validate_done_folder(done_dir, require_thumb_folder=False)
+        info["already_done"] = ok
 
     if info["media_count"] > 0 and info["has_audio"] and info["has_excel"]:
         if info["total_scenes"] > 0:
@@ -1020,15 +1545,6 @@ def scan_visual_projects() -> List[Dict]:
                 log(f"    - {code}: SKIPPED (already processing)")
                 continue
 
-        # Backup: delete PROJECTS/{code} if it exists (VM should have deleted, but just in case)
-        projects_folder = PROJECTS_DIR / code
-        if projects_folder.exists():
-            try:
-                shutil.rmtree(projects_folder)
-                log(f"    - {code}: cleaned up PROJECTS folder (backup)")
-            except Exception as e:
-                log(f"    - {code}: cannot cleanup PROJECTS: {e}", "WARN")
-
         if info["already_done"]:
             log(f"    - {code}: already done")
         elif info["ready_for_edit"]:
@@ -1056,49 +1572,90 @@ def scan_visual_projects() -> List[Dict]:
                         log(f"    - {code}: Failed to delete: {e}", "WARN")
             log(f"    - {code}: NOT ready ({', '.join(reasons)})")
 
-    return sorted(projects, key=lambda x: x["code"])
+    return sorted(projects, key=project_priority_key)
+
+
+def estimate_audio_duration(audio_path: Optional[Path]) -> float:
+    """Best-effort audio duration for queue prioritization."""
+    if not audio_path or not audio_path.exists():
+        return 0.0
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)],
+            capture_output=True, text=True, timeout=10, creationflags=SUBPROCESS_FLAGS
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return max(0.0, float(result.stdout.strip()))
+    except Exception:
+        pass
+    return 0.0
+
+
+def project_priority_key(project_info: Dict):
+    """Shortest-job-first queue order: lighter projects finish sooner."""
+    audio_duration = estimate_audio_duration(project_info.get("audio_path"))
+    media_count = int(project_info.get("media_count") or 0)
+    scene_count = int(project_info.get("total_scenes") or 0)
+    video_count = int(project_info.get("video_count") or 0)
+    image_count = int(project_info.get("image_count") or 0)
+    # Video clips are much heavier than images; voice duration refines ties.
+    weight = (video_count * 1.0) + (image_count * 0.35) + (scene_count * 0.15) + (audio_duration / 20.0)
+    return (weight, media_count, scene_count, audio_duration, project_info.get("code", ""))
 
 
 # ============================================================================
 # VIDEO COMPOSITION
 # ============================================================================
 
-def parse_timestamp(timestamp: str) -> float:
-    """Parse SRT timestamp (HH:MM:SS,mmm or HH:MM:SS.mmm) to seconds."""
-    if not timestamp:
+def parse_timestamp(timestamp) -> float:
+    """Parse time values like HH:MM:SS,mmm / HH:MM:SS.mmmmmm / MM:SS / seconds."""
+    if timestamp is None:
         return 0.0
-    timestamp = str(timestamp).strip()
-    # Split seconds from milliseconds correctly: SRT uses comma, some use dot
-    ms = 0
-    if ',' in timestamp:
-        ts_part, ms_str = timestamp.rsplit(',', 1)
+
+    if isinstance(timestamp, (int, float)):
         try:
-            ms = int(ms_str)
-        except ValueError:
-            ms = 0
-    elif '.' in timestamp:
-        ts_part, ms_str = timestamp.rsplit('.', 1)
-        try:
-            ms = int(ms_str)
-        except ValueError:
-            ms = 0
+            return max(0.0, float(timestamp))
+        except (ValueError, TypeError):
+            return 0.0
+
+    ts = str(timestamp).strip()
+    if not ts:
+        return 0.0
+
+    ts = ts.replace(",", ".")
+    frac = 0.0
+    if "." in ts:
+        ts_part, frac_part = ts.rsplit(".", 1)
+        if frac_part.isdigit():
+            frac = int(frac_part) / (10 ** len(frac_part))
+        else:
+            ts_part = ts
     else:
-        ts_part = timestamp
+        ts_part = ts
+
     parts = ts_part.split(":")
     try:
         if len(parts) == 3:
             h, m, s = parts
-            return int(h) * 3600 + int(m) * 60 + int(s) + ms / 1000.0
+            base = int(h) * 3600 + int(m) * 60 + int(s)
         elif len(parts) == 2:
             m, s = parts
-            return int(m) * 60 + int(s) + ms / 1000.0
-        return float(ts_part) + ms / 1000.0
+            base = int(m) * 60 + int(s)
+        else:
+            return max(0.0, float(ts))
+        return max(0.0, base + frac)
     except (ValueError, TypeError):
         return 0.0
 
 
-def process_srt_for_video(srt_path: Path, output_path: Path, max_chars: int = 50) -> Path:
-    """Process SRT: split long lines."""
+def process_srt_for_video(srt_path: Path, output_path: Path, max_chars: int = 45) -> Path:
+    """Format SRT for burn without destroying voice-aligned cue timing."""
+    MIN_CHUNK_DUR = 0.70
+
+    def to_single_line(text: str) -> str:
+        return " ".join(text.split())
+
     def parse_time(time_str: str) -> float:
         h, m, s = time_str.replace(',', '.').split(':')
         return int(h) * 3600 + int(m) * 60 + float(s)
@@ -1109,56 +1666,96 @@ def process_srt_for_video(srt_path: Path, output_path: Path, max_chars: int = 50
         s = seconds % 60
         return f"{h:02d}:{m:02d}:{s:06.3f}".replace('.', ',')
 
-    def split_text(text: str, max_len: int) -> list:
-        words = text.split()
+    def choose_break(words: list, max_len: int, target_ratio: float = 0.52) -> int:
+        if len(words) <= 1:
+            return 1
+        glue_prev = {"của", "những", "các", "một", "người", "vì", "để", "khi", "nếu", "rằng", "là"}
+        glue_next = {"của", "và", "nhưng", "vì", "để", "khi", "nếu", "rằng", "là", "mà"}
+        total_len = len(" ".join(words))
+        target = total_len * target_ratio
+        best_i = max(1, min(len(words) - 1, len(words) // 2))
+        best_score = float("inf")
+        for i in range(1, len(words)):
+            left = " ".join(words[:i])
+            right = " ".join(words[i:])
+            prev_word = re.sub(r"\W+$", "", words[i - 1].lower())
+            next_word = re.sub(r"^\W+", "", words[i].lower())
+            score = abs(len(left) - target)
+            score += max(0, len(left) - max_len) * 8
+            score += max(0, len(right) - max_len) * 8
+            if i <= 2 or len(words) - i <= 2:
+                score += 35
+            if re.search(r"[.!?…]$", words[i - 1]):
+                score -= 45
+            elif re.search(r"[,;:]$", words[i - 1]):
+                score -= 28
+            if prev_word in glue_prev:
+                score += 35
+            if next_word in glue_next:
+                score += 18
+            if score < best_score:
+                best_score = score
+                best_i = i
+        return best_i
+
+    def to_display_lines(text: str, max_len: int) -> str:
+        # Keep subtitle cues on one line. Fit is handled by font-size profiles.
+        return to_single_line(text)
+
+    def split_only_if_too_long(text: str, max_len: int) -> list:
+        text = to_single_line(text)
+        if len(text) <= max_len * 2:
+            return [text]
         chunks = []
-        current = []
-        current_len = 0
-
-        for word in words:
-            word_len = len(word) + (1 if current else 0)
-            if current_len + word_len <= max_len:
-                current.append(word)
-                current_len += word_len
-            else:
-                if current:
-                    chunks.append(' '.join(current))
-                current = [word]
-                current_len = len(word)
-
-        if current:
-            chunks.append(' '.join(current))
-
-        return chunks if chunks else [text[:max_len]]
+        words = text.split()
+        while len(" ".join(words)) > max_len * 2 and len(words) > 3:
+            i = choose_break(words, max_len * 2, target_ratio=0.50)
+            chunks.append(" ".join(words[:i]).strip())
+            words = words[i:]
+        if words:
+            chunks.append(" ".join(words).strip())
+        return [c for c in chunks if c]
 
     try:
-        with open(srt_path, 'r', encoding='utf-8') as f:
-            content = f.read()
+        content = read_text_best_effort(srt_path)
+        content = unicodedata.normalize("NFC", content).replace("\r\n", "\n").replace("\r", "\n")
 
-        pattern = r'(\d+)\n(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})\n(.*?)(?=\n\n|\Z)'
+        pattern = r'(\d+)\s*\n\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*\n(.*?)(?=\n\s*\n\s*\d+\s*\n|\Z)'
         entries = re.findall(pattern, content, re.DOTALL)
+        if not entries:
+            output_path.write_text(content, encoding='utf-8')
+            log(f"SRT parse found no cues, kept normalized original: {srt_path.name}", "WARN")
+            return output_path if srt_has_cues(output_path) else srt_path
 
         new_entries = []
         new_index = 1
 
         for idx, start, end, text in entries:
-            text = text.strip().replace('\n', ' ').upper()
+            text = to_single_line(text.strip().upper())
             start_sec = parse_time(start)
             end_sec = parse_time(end)
-            duration = end_sec - start_sec
+            duration = max(0.001, end_sec - start_sec)
 
-            if len(text) <= max_chars:
-                new_entries.append((new_index, start, end, text))
+            chunks = split_only_if_too_long(text, max_chars)
+            if len(chunks) == 1:
+                new_entries.append((new_index, start, end, to_display_lines(chunks[0], max_chars)))
                 new_index += 1
-            else:
-                chunks = split_text(text, max_chars)
-                chunk_duration = duration / len(chunks)
+                continue
 
-                for i, chunk in enumerate(chunks):
-                    chunk_start = start_sec + i * chunk_duration
-                    chunk_end = start_sec + (i + 1) * chunk_duration
-                    new_entries.append((new_index, format_time(chunk_start), format_time(chunk_end), chunk))
-                    new_index += 1
+            weights = [max(1, len(c.replace("\n", " "))) for c in chunks]
+            total_w = sum(weights)
+            acc_w = 0
+            for i, chunk in enumerate(chunks):
+                c_start = start_sec + duration * (acc_w / total_w)
+                acc_w += weights[i]
+                if i == len(chunks) - 1:
+                    c_end = end_sec
+                else:
+                    c_end = start_sec + duration * (acc_w / total_w)
+                if c_end - c_start < MIN_CHUNK_DUR and i < len(chunks) - 1:
+                    c_end = min(end_sec, c_start + MIN_CHUNK_DUR)
+                new_entries.append((new_index, format_time(c_start), format_time(c_end), to_display_lines(chunk, max_chars)))
+                new_index += 1
 
         with open(output_path, 'w', encoding='utf-8') as f:
             for idx, start, end, text in new_entries:
@@ -1167,6 +1764,99 @@ def process_srt_for_video(srt_path: Path, output_path: Path, max_chars: int = 50
         return output_path
 
     except Exception as e:
+        return srt_path
+
+
+def shift_srt(srt_path: Path, offset_sec: float, output_path: Path) -> Path:
+    """Shift all SRT timestamps by offset_sec (positive = delay sub)."""
+    def parse_time(t: str) -> float:
+        h, m, s = t.replace(',', '.').split(':')
+        return int(h) * 3600 + int(m) * 60 + float(s)
+
+    def fmt_time(s: float) -> str:
+        s = max(0.0, s)
+        h = int(s // 3600); m = int((s % 3600) // 60); sec = s % 60
+        return f"{h:02d}:{m:02d}:{sec:06.3f}".replace('.', ',')
+
+    try:
+        text = read_text_best_effort(srt_path)
+        def shift_line(m):
+            t1 = parse_time(m.group(1)) + offset_sec
+            t2 = parse_time(m.group(2)) + offset_sec
+            return f"{fmt_time(t1)} --> {fmt_time(t2)}"
+        shifted = re.sub(
+            r'(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})',
+            shift_line, text
+        )
+        output_path.write_text(shifted, encoding='utf-8')
+        return output_path
+    except Exception:
+        return srt_path
+
+
+def shift_srt_with_xfade_compensation(srt_path: Path, media_items: list,
+                                      transition_duration: float,
+                                      disclaimer_duration: float,
+                                      output_path: Path) -> Path:
+    """Adjust SRT to visual timeline when using xfade overlap."""
+    def parse_time(t: str) -> float:
+        h, m, s = t.replace(',', '.').split(':')
+        return int(h) * 3600 + int(m) * 60 + float(s)
+
+    def fmt_time(s: float) -> str:
+        s = max(0.0, s)
+        h = int(s // 3600); m = int((s % 3600) // 60); sec = s % 60
+        return f"{h:02d}:{m:02d}:{sec:06.3f}".replace('.', ',')
+
+    try:
+        scenes = [item for item in media_items if not item.get('is_disclaimer')]
+        scenes_sorted = sorted(scenes, key=lambda x: x.get('start', 0.0))
+        scene_mapping = {}
+        for i, scene in enumerate(scenes_sorted):
+            srt_time = scene.get('start', 0.0)
+            actual_time = disclaimer_duration + srt_time - (i * transition_duration)
+            scene_mapping[srt_time] = max(0.0, actual_time)
+
+        def map_srt_to_video(srt_t: float) -> float:
+            if srt_t <= 0:
+                return disclaimer_duration
+            scene_times = sorted(scene_mapping.keys())
+            if not scene_times:
+                return disclaimer_duration + srt_t
+            if srt_t <= scene_times[0]:
+                first_srt = scene_times[0]
+                first_vid = scene_mapping[first_srt]
+                ratio = srt_t / first_srt if first_srt > 0 else 0
+                return disclaimer_duration + ratio * (first_vid - disclaimer_duration)
+            if srt_t >= scene_times[-1]:
+                last_srt = scene_times[-1]
+                last_vid = scene_mapping[last_srt]
+                return srt_t + (last_vid - last_srt)
+            for i in range(len(scene_times) - 1):
+                t1_srt = scene_times[i]
+                t2_srt = scene_times[i + 1]
+                if t1_srt <= srt_t <= t2_srt:
+                    t1_vid = scene_mapping[t1_srt]
+                    t2_vid = scene_mapping[t2_srt]
+                    ratio = (srt_t - t1_srt) / (t2_srt - t1_srt) if t2_srt > t1_srt else 0
+                    return t1_vid + ratio * (t2_vid - t1_vid)
+            return disclaimer_duration + srt_t
+
+        text = read_text_best_effort(srt_path)
+        def adjust_line(m):
+            t1_srt = parse_time(m.group(1))
+            t2_srt = parse_time(m.group(2))
+            t1_vid = map_srt_to_video(t1_srt)
+            t2_vid = map_srt_to_video(t2_srt)
+            return f"{fmt_time(t1_vid)} --> {fmt_time(t2_vid)}"
+
+        adjusted = re.sub(
+            r'(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})',
+            adjust_line, text
+        )
+        output_path.write_text(adjusted, encoding='utf-8')
+        return output_path
+    except Exception:
         return srt_path
 
 
@@ -1211,10 +1901,6 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
     # Find SRT file
     srt_files = list(project_dir.glob("srt/*.srt")) + list(project_dir.glob("*.srt"))
     srt_path = srt_files[0] if srt_files else None
-
-    if srt_path:
-        processed_srt = project_dir / f"{code}.srt"
-        srt_path = process_srt_for_video(srt_path, processed_srt, max_chars=50)
 
     output_path = project_dir / f"{code}.mp4"
 
@@ -1401,10 +2087,10 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
         try:
             temp_video = Path(temp_dir) / "temp_video.mp4"
 
-            # Normalize voice: 2-pass loudnorm -14 LUFS (YouTube standard) + dynaudnorm
+            # Normalize voice before timing/mixing so merged ElevenLabs chunks stay even.
             update_progress(code=code, step="Normalizing audio", percent=3)
-            plog("  Normalizing voice (EBU R128 -14 LUFS)...")
-            norm_voice = normalize_voice(voice_path, Path(temp_dir))
+            plog("  Mastering voice (-14 LUFS, TP -1.5 dB, local leveling)...")
+            norm_voice = normalize_voice(voice_path, Path(temp_dir), label="voice")
             if norm_voice != voice_path:
                 plog(f"  Voice normalized: {voice_path.name} -> {norm_voice.name}")
                 voice_path = norm_voice
@@ -1429,13 +2115,6 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                     if matches:
                         disclaimer_img = matches[0]
                         break
-                # Fallback to 0.jpg / 0.png
-                if not disclaimer_img:
-                    for ext in [".jpg", ".png"]:
-                        fb = IMAGES_DIR / f"0{ext}"
-                        if fb.exists():
-                            disclaimer_img = fb
-                            break
 
             if disclaimer_img:
                 plog(f"  Disclaimer: {disclaimer_img.name} ({DISCLAIMER_DURATION}s) prepended to video")
@@ -1458,6 +2137,16 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             video_transition = channel_template.get("video_transition", "random").lower()
             output_fps = 30  # Fixed FPS
             transition_duration = 0.5
+            veo_crop_enabled = _to_bool(channel_template.get("veo_crop_enabled", True), True)
+            veo_crop_right_ratio = _to_float(channel_template.get("veo_crop_right_ratio", 0.05), 0.05)
+            veo_crop_bottom_ratio = _to_float(channel_template.get("veo_crop_bottom_ratio", 0.07), 0.07)
+            veo_crop_min_right_px = _to_int(channel_template.get("veo_crop_min_right_px", 56), 56)
+            veo_crop_min_bottom_px = _to_int(channel_template.get("veo_crop_min_bottom_px", 48), 48)
+            veo_crop_keep_4k_aspect = _to_bool(channel_template.get("veo_crop_keep_4k_aspect", True), True)
+            veo_crop_right_ratio = max(0.0, min(0.2, veo_crop_right_ratio))
+            veo_crop_bottom_ratio = max(0.0, min(0.2, veo_crop_bottom_ratio))
+            veo_crop_min_right_px = max(2, min(200, veo_crop_min_right_px))
+            veo_crop_min_bottom_px = max(2, min(200, veo_crop_min_bottom_px))
 
             # Fallback to global config if no template settings
             try:
@@ -1483,9 +2172,16 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             prefer_gpu = channel_template.get("prefer_gpu", "auto").lower()
 
             plog(f"  Channel: {channel} | Res: {output_resolution.upper()} | Mode: {compose_mode}")
+            if veo_crop_enabled:
+                plog(
+                    f"  Veo crop: ON (right={veo_crop_right_ratio:.3f}, bottom={veo_crop_bottom_ratio:.3f}, "
+                    f"min={veo_crop_min_right_px}px/{veo_crop_min_bottom_px}px, keep_aspect={veo_crop_keep_4k_aspect})"
+                )
+            else:
+                plog("  Veo crop: OFF")
 
-            # Determine if using xfade transitions (mix/wipe need xfade filter)
-            use_xfade = video_transition in ["mix", "wipe", "random"]
+            # Determine if using xfade transitions (all presets except "none" use xfade)
+            use_xfade = video_transition != "none"
             FADE_DURATION = transition_duration if use_xfade else 0.4
 
             # FIX: xfade timing compensation via padding.
@@ -1659,13 +2355,56 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                     if not success:
                         # Fallback to FFmpeg
                         abs_path = str(media_path.resolve()).replace('\\', '/')
-                        probe_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                                    "-of", "default=noprint_wrappers=1:nokey=1", abs_path]
+                        probe_cmd = [
+                            "ffprobe", "-v", "error",
+                            "-show_entries", "format=duration:stream=width,height",
+                            "-select_streams", "v:0",
+                            "-of", "json", abs_path
+                        ]
                         probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
-                        video_duration = float(probe_result.stdout.strip()) if probe_result.stdout.strip() else 8.0
+                        video_duration = 8.0
+                        src_w, src_h = 0, 0
+                        if probe_result.returncode == 0 and probe_result.stdout.strip():
+                            try:
+                                probe_data = json.loads(probe_result.stdout)
+                                video_duration = float((probe_data.get("format", {}) or {}).get("duration") or 8.0)
+                                streams = probe_data.get("streams") or []
+                                if streams:
+                                    src_w = int(streams[0].get("width") or 0)
+                                    src_h = int(streams[0].get("height") or 0)
+                            except Exception:
+                                pass
 
                         out_w, out_h = kb_config['output_size']
-                        base_vf = f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2"
+                        crop_prefix = ""
+                        crop_info = None
+                        if kb_config.get('veo_crop_enabled', True) and src_w > 0 and src_h > 0:
+                            crop_info = compute_veo_crop_geometry(
+                                src_w=src_w,
+                                src_h=src_h,
+                                target_w=out_w,
+                                target_h=out_h,
+                                right_ratio=kb_config.get('veo_crop_right_ratio', 0.05),
+                                bottom_ratio=kb_config.get('veo_crop_bottom_ratio', 0.07),
+                                min_right_px=kb_config.get('veo_crop_min_right_px', 56),
+                                min_bottom_px=kb_config.get('veo_crop_min_bottom_px', 48),
+                                keep_target_aspect=kb_config.get('veo_crop_keep_4k_aspect', True),
+                            )
+                        if crop_info:
+                            crop_prefix = f"crop={crop_info['crop_w']}:{crop_info['crop_h']}:{crop_info['crop_x']}:{crop_info['crop_y']},"
+                            if idx < 3:
+                                print(
+                                    f"    Veo crop applied [{media_path.name}]: "
+                                    f"right={crop_info['right_crop']}px bottom={crop_info['bottom_crop']}px "
+                                    f"({src_w}x{src_h} -> {crop_info['crop_w']}x{crop_info['crop_h']})"
+                                )
+
+                        if crop_info:
+                            # Crop already aligned to target aspect -> direct scale, no pad/letterbox.
+                            base_vf = f"{crop_prefix}scale={out_w}:{out_h}:flags=lanczos,setsar=1"
+                        else:
+                            # Fallback: fill frame without black bars.
+                            base_vf = f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase,crop={out_w}:{out_h},setsar=1"
                         if kb_config['use_xfade']:
                             vf = base_vf
                         else:
@@ -1684,15 +2423,27 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                                 "-an", "-r", str(kb_config['fps']), str(clip_path)
                             ]
                         elif video_duration < target_duration and video_duration > 0.5:
-                            # Video shorter → slow down to fill target duration
-                            slow_factor = target_duration / video_duration
-                            slow_vf = f"setpts={slow_factor}*PTS,{vf}"
+                            # Video shorter → loop to exceed target, then trim to exact duration
+                            import math
+                            loop_count = math.ceil(target_duration / video_duration)
+                            # Add small buffer to ensure smooth loop (extra 0.1x)
+                            loop_count = max(2, loop_count)
+                            looped_duration = video_duration * loop_count
+
+                            # Use concat demuxer for seamless loop (better than -stream_loop for accuracy)
+                            # Create looped video, then trim to exact target_duration
+                            loop_vf = f"{vf}"
                             cmd_clip = [
-                                "ffmpeg", "-y", "-i", abs_path,
-                                "-vf", slow_vf, "-c:v", v_encoder, *v_preset,
+                                "ffmpeg", "-y",
+                                "-stream_loop", str(loop_count - 1), "-i", abs_path,
+                                "-t", str(target_duration),
+                                "-vf", loop_vf,
+                                "-c:v", v_encoder, *v_preset,
                                 "-pix_fmt", "yuv420p", "-an", "-r", str(kb_config['fps']),
-                                "-t", str(target_duration), str(clip_path)
+                                str(clip_path)
                             ]
+                            if idx < 3:
+                                print(f"    Loop video [{media_path.name}]: {video_duration:.1f}s × {loop_count} = {looped_duration:.1f}s → trim to {target_duration:.1f}s")
                         else:
                             # Video same duration → use as-is
                             cmd_clip = [
@@ -1756,6 +2507,12 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                 'use_gpu': use_gpu,
                 'gpu_encoder': gpu_encoder,
                 'compose_mode': compose_mode,
+                'veo_crop_enabled': veo_crop_enabled,
+                'veo_crop_right_ratio': veo_crop_right_ratio,
+                'veo_crop_bottom_ratio': veo_crop_bottom_ratio,
+                'veo_crop_min_right_px': veo_crop_min_right_px,
+                'veo_crop_min_bottom_px': veo_crop_min_bottom_px,
+                'veo_crop_keep_4k_aspect': veo_crop_keep_4k_aspect,
             }
 
             # Create task list
@@ -1799,6 +2556,47 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             _t['clips'] = time.time()
             _num_clips = len(clip_paths)
 
+            def _probe_clip_duration(cp):
+                try:
+                    if not cp.exists() or cp.stat().st_size <= 1024:
+                        return 0.0
+                    probe_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                 "-of", "default=noprint_wrappers=1:nokey=1", str(cp)]
+                    probe_result = subprocess.run(
+                        probe_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=20,
+                        creationflags=SUBPROCESS_FLAGS,
+                    )
+                    if probe_result.returncode != 0:
+                        return 0.0
+                    return float(probe_result.stdout.strip() or 0.0)
+                except Exception:
+                    return 0.0
+
+            def _clip_is_valid(cp, min_duration=0.05):
+                return _probe_clip_duration(cp) >= min_duration
+
+            def _repair_clip_list(paths, label):
+                repaired = []
+                bad = []
+                for clip_idx, clip_path in enumerate(paths):
+                    clip_path = Path(clip_path)
+                    if _clip_is_valid(clip_path):
+                        repaired.append(clip_path)
+                        continue
+                    fallback_clip = Path(temp_dir) / f"clip_{clip_idx:03d}.mp4"
+                    if fallback_clip != clip_path and _clip_is_valid(fallback_clip):
+                        plog(f"    {label}: {clip_path.name} invalid, using {fallback_clip.name}", "WARN")
+                        repaired.append(fallback_clip)
+                    else:
+                        bad.append(clip_path.name)
+                        repaired.append(clip_path)
+                if bad:
+                    plog(f"    {label}: invalid clips remain: {', '.join(bad[:8])}", "WARN")
+                return repaired, bad
+
             # Re-encode clips for high quality xfade (avoid artifacts during crossfade)
             # Also upscale to final resolution if needed (1080p -> 4K)
             if use_xfade and len(clip_paths) > 1:
@@ -1810,6 +2608,11 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                     """Re-encode a single clip - runs in parallel."""
                     i, cp, temp_dir_path, use_gpu_enc, gpu_enc, do_upscale, final_size, target_dur = args
                     reenc_path = Path(temp_dir_path) / f"hq_{i:03d}.mp4"
+                    try:
+                        if reenc_path.exists():
+                            reenc_path.unlink()
+                    except:
+                        pass
 
                     # Build scale filter for upscaling
                     scale_filter = f"scale={final_size[0]}:{final_size[1]}:flags=lanczos" if do_upscale else ""
@@ -1845,16 +2648,23 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
 
                     try:
                         result = subprocess.run(reencode_cmd, capture_output=True, text=True, timeout=180, creationflags=SUBPROCESS_FLAGS)
-                        if result.returncode == 0 and reenc_path.exists():
-                            # Delete original to save space
-                            try:
-                                cp.unlink()
-                            except:
-                                pass
+                        reenc_ok = (result.returncode == 0 and _clip_is_valid(reenc_path))
+                        if result.returncode == 0 and reenc_ok:
+                            # Keep original clip until final cleanup so we always have a fallback.
                             return (i, reenc_path)
                         else:
+                            try:
+                                if reenc_path.exists() and not _clip_is_valid(reenc_path):
+                                    reenc_path.unlink()
+                            except:
+                                pass
                             return (i, cp)  # Keep original if re-encode fails
                     except:
+                        try:
+                            if reenc_path.exists() and not _clip_is_valid(reenc_path):
+                                reenc_path.unlink()
+                        except:
+                            pass
                         return (i, cp)
 
                 # Keep clips at render_size (1080p) for xfade - upscale happens after merge in subtitle burn
@@ -1882,9 +2692,25 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
 
                 # Sort by index to maintain order
                 reencoded_results.sort(key=lambda x: x[0])
-                clip_paths = [r[1] for r in reencoded_results]
+                repaired_clip_paths = []
+                for clip_idx, clip_path in reencoded_results:
+                    clip_ok = _clip_is_valid(clip_path)
+                    if not clip_ok:
+                        fallback_clip = Path(temp_dir) / f"clip_{clip_idx:03d}.mp4"
+                        if _clip_is_valid(fallback_clip):
+                            plog(f"    Re-encode output invalid, using original clip_{clip_idx:03d}.mp4", "WARN")
+                            clip_path = fallback_clip
+                            clip_ok = True
+                    if not clip_ok:
+                        plog(f"    Clip invalid after re-encode: {clip_path.name}", "WARN")
+                    repaired_clip_paths.append(clip_path)
+                clip_paths = repaired_clip_paths
                 plog(f"  Re-encoded {len(clip_paths)} clips")
             _t['reencode'] = time.time()
+
+            clip_paths, invalid_after_reencode = _repair_clip_list(clip_paths, "Pre-concat validation")
+            if invalid_after_reencode:
+                return False, None, f"Invalid clips before concat: {', '.join(invalid_after_reencode[:8])}"
 
             update_progress(code=code, step="Concatenating", percent=75)
 
@@ -1975,13 +2801,11 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                     batch_durations = []
                     for cp in batch_clips:
                         # Validate file exists and has content
-                        if not cp.exists() or cp.stat().st_size < 1000:
-                            plog(f"    Clip invalid/missing: {cp.name} ({cp.stat().st_size if cp.exists() else 0} bytes)", "WARN")
+                        dur = _probe_clip_duration(cp)
+                        if dur <= 0:
+                            size = cp.stat().st_size if cp.exists() else 0
+                            plog(f"    Clip invalid/missing: {cp.name} ({size} bytes)", "WARN")
                             return None
-                        probe_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                                    "-of", "default=noprint_wrappers=1:nokey=1", str(cp)]
-                        probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
-                        dur = float(probe_result.stdout.strip()) if probe_result.stdout.strip() else 0.0
                         if dur < transition_duration:
                             plog(f"    Clip too short for xfade: {cp.name} ({dur:.2f}s < {transition_duration}s)", "WARN")
                             return None
@@ -2048,9 +2872,14 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                         else:
                             result = _run_xfade("libx264", ["-preset", "fast", "-crf", "18", "-profile:v", "high"])
 
-                        if result.returncode == 0 and batch_output.exists():
+                        if result.returncode == 0 and _clip_is_valid(batch_output):
                             return batch_output
                         plog(f"    xfade batch returncode={result.returncode}: {result.stderr[-400:]}", "WARN")
+                        try:
+                            if batch_output.exists() and not _clip_is_valid(batch_output):
+                                batch_output.unlink()
+                        except:
+                            pass
                         return None
                     except subprocess.TimeoutExpired:
                         plog(f"    xfade batch timed out (1200s)", "WARN")
@@ -2252,8 +3081,10 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             # If project_dir/music/ exists with .mp3 files AND Excel has a 'music'
             # sheet with start_time data, mix each track at the correct timestamp.
             # Each track is trimmed so it ends exactly when the next track starts.
-            # Voice stays at 100%; music is blended at MUSIC_VOLUME (18%).
-            MUSIC_VOLUME = 0.25   # 25% ≈ -12 dB (nghe nhẹ music, không lấn át voice)
+            # Keep music clearly in the background: lower base level + duck under voice.
+            MUSIC_VOLUME = 0.22   # 22% base bed: clearer background music, still ducked under voice
+            MUSIC_DUCK_THRESHOLD = 0.035
+            MUSIC_DUCK_RATIO = 10
             music_dir    = project_dir / "music"
             music_segments = []  # list of (start_sec, allowed_dur_sec, mp3_path)
 
@@ -2351,16 +3182,20 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
 
                     if r_m.returncode == 0 and music_mix_path.exists() \
                             and music_mix_path.stat().st_size > 1000:
-                        # ── Mix voice (100%) + music_mix (MUSIC_VOLUME) ───────
+                        # ── Mix voice + background music with speech-priority ducking ──
                         temp_mixed = Path(temp_dir) / "voice_with_music.mp3"
                         cmd_amix = [
                             "ffmpeg", "-y",
                             "-i", str(voice_path),
                             "-i", str(music_mix_path),
                             "-filter_complex",
-                            # normalize=0: voice×1.0 + music×MUSIC_VOLUME (no automatic halving)
-                            f"[0:a][1:a]amix=inputs=2:duration=first"
-                            f":weights=1.0 {MUSIC_VOLUME}:normalize=0[aout]",
+                            # Lower music first, then duck it further whenever voice is active.
+                            f"[1:a]volume={MUSIC_VOLUME}[bgbase];"
+                            f"[bgbase][0:a]sidechaincompress=threshold={MUSIC_DUCK_THRESHOLD}:"
+                            f"ratio={MUSIC_DUCK_RATIO}:attack=20:release=350:makeup=1"
+                            f"[bgduck];"
+                            f"[0:a][bgduck]amix=inputs=2:duration=first:"
+                            f"weights=1.0 1.0:normalize=0[aout]",
                             "-map", "[aout]", "-b:a", "256k", str(temp_mixed)
                         ]
                         r_amix = subprocess.run(cmd_amix, capture_output=True, text=True,
@@ -2368,7 +3203,7 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                         if r_amix.returncode == 0 and temp_mixed.exists():
                             voice_path = temp_mixed  # use mixed audio downstream
                             plog(f"  Voice + music mixed OK "
-                                 f"(voice 100% / music {int(MUSIC_VOLUME*100)}%)")
+                                 f"(voice priority, music base {int(MUSIC_VOLUME*100)}%, ducked under speech)")
                         else:
                             plog(f"  amix voice+music failed: {r_amix.stderr[-150:]}", "WARN")
                     else:
@@ -2377,6 +3212,15 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                 except Exception as _emx:
                     plog(f"  Music mix error (continuing without music): {_emx}", "WARN")
             # ─────────────────────────────────────────────────────────────────
+
+            # Final audio master after optional music mix. This is intentionally after
+            # ducking/amix, because mixing changes integrated loudness and true peak.
+            final_audio = normalize_voice(voice_path, Path(temp_dir), label="final_audio")
+            if final_audio != voice_path:
+                voice_path = final_audio
+                plog("  Final audio mastered for YouTube loudness")
+            else:
+                plog("  Final audio master fallback: using current audio", "WARN")
 
             plog("  Adding audio to video...")
             # When disclaimer is prepended (D seconds), delay voice to stay in sync with video scenes.
@@ -2402,6 +3246,25 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
             if srt_path and srt_path.exists():
                 update_progress(code=code, step="Burning subtitles", percent=90)
 
+                # Default behavior is voice sync: only shift by disclaimer.
+                # Optional "video" mode keeps xfade compensation behavior.
+                burn_srt = srt_path
+                subtitle_sync_mode = str(channel_template.get("subtitle_sync", "voice")).lower().strip()
+                if subtitle_sync_mode == "video" and use_xfade:
+                    shifted_srt = Path(temp_dir) / f"{srt_path.stem}_xfade_adjusted.srt"
+                    burn_srt = shift_srt_with_xfade_compensation(
+                        srt_path, media_items, transition_duration,
+                        DISCLAIMER_DURATION if disclaimer_img else 0.0,
+                        shifted_srt
+                    )
+                    plog(f"  SRT adjusted for xfade transitions (T={transition_duration}s)")
+                elif disclaimer_img and DISCLAIMER_DURATION > 0:
+                    shifted_srt = Path(temp_dir) / f"{srt_path.stem}_shifted.srt"
+                    burn_srt = shift_srt(srt_path, DISCLAIMER_DURATION, shifted_srt)
+                    plog(f"  SRT shifted +{DISCLAIMER_DURATION}s to match disclaimer")
+                elif subtitle_sync_mode not in ("voice", "video"):
+                    plog(f"  Unknown subtitle_sync='{subtitle_sync_mode}', fallback to voice sync", "WARN")
+
                 # NVENC for subtitle burn: libass renders on CPU, encoding offloaded to GPU
                 # Test proved: NVENC = ~17 min vs CPU = ~49 min (3x faster)
                 use_gpu_sub = use_gpu
@@ -2411,18 +3274,36 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                 else:
                     plog(f"  Burning subtitles [{sub_method}]...")
 
-                srt_escaped = str(srt_path).replace('\\', '/').replace(':', '\\:')
-
                 # Use local fonts from fonts/ folder with channel template
                 fonts_dir = str(TOOL_DIR / "fonts").replace('\\', '/').replace(':', '\\:')
                 template = get_subtitle_template(code)
+                requested_font = template.get("font", "Auto")
+                subtitle_text = read_text_best_effort(burn_srt)
+                resolved_font = choose_subtitle_font(requested_font, subtitle_text)
+                detected_lang = detect_subtitle_language(subtitle_text)
+                render_profile = get_subtitle_render_profile(resolved_font, detected_lang)
+                processed_srt = Path(temp_dir) / f"{burn_srt.stem}_wrapped.srt"
+                burn_srt = process_srt_for_video(burn_srt, processed_srt, max_chars=render_profile["max_chars"])
+                utf8_srt = Path(temp_dir) / f"{burn_srt.stem}_utf8.srt"
+                burn_srt = normalize_srt_utf8(burn_srt, utf8_srt)
+                if not srt_has_cues(burn_srt):
+                    return False, None, f"Subtitle error: SRT has no cues or is empty ({burn_srt})"
+
+                srt_escaped = str(burn_srt).replace('\\', '/').replace(':', '\\:')
+                if resolved_font != requested_font:
+                    plog(f"  Subtitle font selected [{detected_lang}]: {requested_font} -> {resolved_font}")
+                elif requested_font == "Auto":
+                    plog(f"  Subtitle font selected [{detected_lang}]: {resolved_font}")
+                font_size, outline_size, margin_v = subtitle_style_numbers(template, resolved_font, detected_lang)
+                if font_size != _to_int(template.get("size", 28), 28) or render_profile["max_chars"] != 45:
+                    plog(f"  Subtitle fit: size={font_size}, max_chars={render_profile['max_chars']}, margin_v={margin_v}")
                 subtitle_style = (
-                    f"FontName={template['font']},FontSize={template['size']},"
-                    f"PrimaryColour={template['color']},OutlineColour={template['outline']},"
-                    f"BorderStyle=1,Outline={template['outline_size']},Shadow=1,"
-                    f"MarginV={template['margin_v']},Alignment={template['alignment']}"
+                    f"FontName={escape_ass_style_value(resolved_font)},FontSize={font_size},"
+                    f"PrimaryColour={escape_ass_style_value(template['color'])},OutlineColour={escape_ass_style_value(template['outline'])},"
+                    f"BorderStyle=1,Outline={outline_size},Shadow=1,WrapStyle=2,"
+                    f"MarginV={margin_v},Alignment={template['alignment']}"
                 )
-                vf_filter = f"subtitles='{srt_escaped}':fontsdir='{fonts_dir}':force_style='{subtitle_style}'"
+                vf_filter = f"subtitles='{srt_escaped}':fontsdir='{fonts_dir}':charenc=UTF-8:force_style='{subtitle_style}'"
 
                 # Upscale 1080p → 4K combined with subtitle burn (single pass, efficient)
                 if needs_upscale:
@@ -2446,9 +3327,9 @@ def compose_video(project_info: Dict, callback=None) -> Tuple[bool, Optional[Pat
                         result2 = subprocess.run(cmd3_cpu, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
                         if result2.returncode != 0:
                             plog(f"  CPU subtitle burn also failed: {result2.stderr[-200:]}", "ERROR")
-                            shutil.copy(temp_with_audio, temp_with_subs)
+                            return False, None, f"Subtitle burn error: {result2.stderr[-500:]}"
                     else:
-                        shutil.copy(temp_with_audio, temp_with_subs)
+                        return False, None, f"Subtitle burn error: {result.stderr[-500:]}"
             else:
                 if needs_upscale:
                     fw, fh = final_output_size
@@ -2686,6 +3567,251 @@ def overlay_nv_on_video(video_path: Path, nv_path: Path, output_path: Path,
         return False
 
 
+def select_best_thumbnail_for_done(project_info: Dict, callback=None) -> bool:
+    """Create VISUAL/<code>/<code>.jpg from VISUAL/<code>/thumb when available."""
+    code = project_info["code"]
+    project_dir = project_info["path"]
+
+    def plog(msg, level="INFO"):
+        if callback:
+            callback(msg, level)
+        else:
+            log(f"[{code}] {msg}", level)
+
+    visual_thumb_dir = project_dir / "thumb"
+    if not visual_thumb_dir.exists() or not visual_thumb_dir.is_dir():
+        return False
+
+    selector_script = TOOL_DIR / "select_best_thumb.py"
+    if not selector_script.exists():
+        plog("Thumbnail selector not found: select_best_thumb.py", "WARN")
+        return False
+
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(selector_script),
+                "--code", code,
+                "--project-dir", str(project_dir),
+                "--output", str(project_dir / f"{code}.jpg"),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=SUBPROCESS_FLAGS if sys.platform == "win32" else 0,
+        )
+
+        output = (result.stdout or result.stderr or "").strip()
+        if result.returncode == 0:
+            if output:
+                plog(output.splitlines()[-1])
+            return True
+
+        if result.returncode == 2:
+            plog("No images in VISUAL thumb folder to select", "WARN")
+        else:
+            plog(f"Thumbnail selector failed: {output[-300:] if output else 'Unknown error'}", "WARN")
+        return False
+
+    except subprocess.TimeoutExpired:
+        plog("Thumbnail selector timed out", "WARN")
+        return False
+    except Exception as e:
+        plog(f"Thumbnail selector error: {e}", "WARN")
+        return False
+
+
+def find_fallback_thumbnail_source(project_info: Dict) -> Optional[Path]:
+    """Find a usable project image when the dedicated thumbnail pipeline has no output."""
+    project_dir = project_info["path"]
+    code = project_info["code"]
+
+    def _natural_key(name: str):
+        return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", name)]
+
+    candidates = [
+        project_dir / f"{code}.jpg",
+        project_dir / f"{code}.png",
+        project_dir / "thumbnail" / "thumb_003.png",
+        project_dir / "thumb" / "thumb_003.png",
+    ]
+
+    for base in [project_dir / "thumbnail", project_dir / "thumb", project_dir / "img", project_dir / "img_backup", project_dir]:
+        if not base.exists() or not base.is_dir():
+            continue
+        for ext in ("*.jpg", "*.jpeg", "*.png", "*.webp"):
+            candidates.extend(sorted(base.glob(ext), key=lambda p: _natural_key(p.name)))
+
+    for src in candidates:
+        if src.exists() and src.is_file():
+            stem = src.stem.lower()
+            if stem.startswith(("nv", "loc")):
+                continue
+            return src
+
+    return None
+
+
+def create_fallback_thumbnail(project_info: Dict, dst_path: Path, callback=None) -> bool:
+    """Create required DONE JPG from project media when no explicit thumbnail exists."""
+    code = project_info["code"]
+    project_dir = project_info["path"]
+
+    def plog(msg, level="INFO"):
+        if callback:
+            callback(msg, level)
+        else:
+            log(f"[{code}] {msg}", level)
+
+    src_image = find_fallback_thumbnail_source(project_info)
+    if src_image:
+        if copy_thumbnail_as_jpg(src_image, dst_path):
+            plog(f"Created fallback thumbnail from {src_image.parent.name}/{src_image.name}: {dst_path.name}", "WARN")
+            return True
+        plog(f"Fallback thumbnail image could not be normalized: {src_image}", "WARN")
+
+    video_path = project_dir / f"{code}.mp4"
+    if not video_path.exists():
+        return False
+
+    try:
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        frame_path = dst_path.parent / f"{code}_frame_tmp.jpg"
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", "3",
+            "-i", str(video_path),
+            "-frames:v", "1",
+            "-q:v", "3",
+            str(frame_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, creationflags=SUBPROCESS_FLAGS)
+        if result.returncode != 0 or not frame_path.exists():
+            plog(f"Fallback thumbnail frame failed: {result.stderr[-200:] if result.stderr else 'Unknown error'}", "WARN")
+            return False
+        ok = copy_thumbnail_as_jpg(frame_path, dst_path)
+        try:
+            frame_path.unlink()
+        except Exception:
+            pass
+        if ok:
+            plog(f"Created fallback thumbnail from rendered video: {dst_path.name}", "WARN")
+        return ok
+    except Exception as e:
+        plog(f"Fallback thumbnail error: {e}", "WARN")
+        return False
+
+
+def copy_thumbnail_as_jpg(src_path: Path, dst_path: Path, max_bytes: int = 2 * 1024 * 1024) -> bool:
+    """Copy/convert a thumbnail source to JPG and keep it under max_bytes."""
+    try:
+        from PIL import Image, ImageEnhance, ImageOps
+
+        img = Image.open(src_path)
+        img = ImageOps.exif_transpose(img)
+        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            bg = Image.new("RGB", img.size, "white")
+            rgba = img.convert("RGBA")
+            bg.paste(rgba, mask=rgba.split()[-1])
+            img = bg
+        else:
+            img = img.convert("RGB")
+
+        img.thumbnail((1920, 1080), Image.Resampling.LANCZOS)
+        img = ImageOps.autocontrast(img, cutoff=0.4)
+        img = ImageEnhance.Sharpness(img).enhance(1.08)
+
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        work = img
+        for _ in range(5):
+            for quality in (95, 92, 90, 88, 85, 82, 78, 74, 70, 66, 62, 58):
+                work.save(dst_path, "JPEG", quality=quality, optimize=True, progressive=True, subsampling=1)
+                if dst_path.stat().st_size <= max_bytes:
+                    return True
+            next_size = (max(640, int(work.width * 0.88)), max(360, int(work.height * 0.88)))
+            if next_size == work.size:
+                break
+            work = work.resize(next_size, Image.Resampling.LANCZOS)
+
+        work.save(dst_path, "JPEG", quality=55, optimize=True, progressive=True, subsampling=2)
+        return dst_path.exists() and dst_path.stat().st_size <= max_bytes
+    except Exception:
+        return False
+
+
+def validate_done_folder(done_folder: Path, require_thumb_folder: bool = False) -> Tuple[bool, List[str]]:
+    """Validate final DONE/<code> package has required deliverables."""
+    missing = []
+
+    if not any(done_folder.glob("*.mp4")):
+        missing.append("mp4")
+    if not any(done_folder.glob("*.srt")):
+        missing.append("srt")
+
+    jpg_files = list(done_folder.glob("*.jpg"))
+    if not jpg_files:
+        missing.append("jpg")
+    elif not any(p.stat().st_size <= 2 * 1024 * 1024 for p in jpg_files):
+        missing.append("jpg < 2MB")
+
+    thumb_dir = done_folder / "thumb"
+    if require_thumb_folder and (not thumb_dir.exists() or not thumb_dir.is_dir()):
+        missing.append("thumb folder")
+
+    return len(missing) == 0, missing
+
+
+def run_seo_tho_for_done(project_info: Dict, done_folder: Path, callback=None) -> bool:
+    """Rename DONE mp4/jpg/srt by clean video title and write basic metadata."""
+    code = project_info["code"]
+    project_dir = project_info["path"]
+
+    def plog(msg, level="INFO"):
+        if callback:
+            callback(msg, level)
+        else:
+            log(f"[{code}] {msg}", level)
+
+    seo_script = TOOL_DIR / "seo_tho.py"
+    if not seo_script.exists():
+        plog("SEO-tho script not found: seo_tho.py", "WARN")
+        return False
+
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(seo_script),
+                "--code", code,
+                "--done-dir", str(done_folder),
+                "--project-dir", str(project_dir),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=900,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=SUBPROCESS_FLAGS if sys.platform == "win32" else 0,
+        )
+        output = (result.stdout or result.stderr or "").strip()
+        if result.returncode == 0:
+            if output:
+                plog(output.splitlines()[-1])
+            return True
+
+        plog(f"SEO-tho failed: {output[-400:] if output else 'Unknown error'}", "WARN")
+        return False
+    except subprocess.TimeoutExpired:
+        plog("SEO-tho timed out", "WARN")
+        return False
+    except Exception as e:
+        plog(f"SEO-tho error: {e}", "WARN")
+        return False
+
+
 def copy_to_done(project_info: Dict, video_path: Path, callback=None) -> Tuple[bool, Optional[str]]:
     code = project_info["code"]
     project_dir = project_info["path"]
@@ -2717,32 +3843,70 @@ def copy_to_done(project_info: Dict, video_path: Path, callback=None) -> Tuple[b
         shutil.copy2(srt_path, dst_srt)
         plog(f"Copied SRT: {dst_srt.name}")
 
-    # 3. Copy thumbnail (check multiple locations)
+    # 3. Select/normalize thumbnail from VISUAL/<code>/thumb before copying.
+    select_best_thumbnail_for_done(project_info, callback)
+
+    # 4. Copy thumbnail (check multiple locations)
     thumb_copied = False
+    dst_thumb = done_folder / f"{code}_thumb.jpg"
+
     # Check VISUAL folder first (generated by run_thumb.py)
     thumb_in_visual = project_dir / f"{code}.jpg"
     if thumb_in_visual.exists():
-        dst_thumb = done_folder / f"{code}_thumb.jpg"
-        shutil.copy2(thumb_in_visual, dst_thumb)
-        plog(f"Copied thumbnail: {dst_thumb.name}")
-        thumb_copied = True
+        if copy_thumbnail_as_jpg(thumb_in_visual, dst_thumb):
+            plog(f"Copied thumbnail: {dst_thumb.name}")
+            thumb_copied = True
+        else:
+            plog(f"Cannot normalize thumbnail: {thumb_in_visual.name}", "WARN")
 
     # Check thumb/thumbnails folder
     if not thumb_copied:
         thumb_in_tool = TOOL_DIR / "thumb" / "thumbnails" / f"{code}.jpg"
         if thumb_in_tool.exists():
-            dst_thumb = done_folder / f"{code}_thumb.jpg"
-            shutil.copy2(thumb_in_tool, dst_thumb)
-            plog(f"Copied thumbnail: {dst_thumb.name}")
-            thumb_copied = True
+            if copy_thumbnail_as_jpg(thumb_in_tool, dst_thumb):
+                plog(f"Copied thumbnail: {dst_thumb.name}")
+                thumb_copied = True
+            else:
+                plog(f"Cannot normalize thumbnail: {thumb_in_tool.name}", "WARN")
 
     # Fallback to global THUMB_DIR
     if not thumb_copied:
         thumb_path = find_thumbnail(code)
         if thumb_path:
-            dst_thumb = done_folder / f"{code}_thumb{thumb_path.suffix}"
-            shutil.copy2(thumb_path, dst_thumb)
-            plog(f"Copied thumbnail: {dst_thumb.name}")
+            if copy_thumbnail_as_jpg(thumb_path, dst_thumb):
+                plog(f"Copied thumbnail: {dst_thumb.name}")
+                thumb_copied = True
+            else:
+                plog(f"Cannot normalize thumbnail: {thumb_path.name}", "WARN")
+
+    # Root fallback: render succeeded, but no dedicated thumbnail exists.
+    # DONE validation requires a JPG, so make one from project media instead of rerendering forever.
+    if not thumb_copied:
+        thumb_copied = create_fallback_thumbnail(project_info, dst_thumb, callback)
+        if not thumb_copied:
+            plog("No thumbnail source found; DONE validation will fail", "WARN")
+
+    # 5. Copy thumb folder: VISUAL/<code>/thumb -> DONE/<code>/thumb
+    visual_thumb_dir = project_dir / "thumb"
+    if visual_thumb_dir.exists() and visual_thumb_dir.is_dir():
+        dst_thumb_dir = done_folder / "thumb"
+        shutil.copytree(visual_thumb_dir, dst_thumb_dir, dirs_exist_ok=True)
+        plog(f"Copied thumb folder: {visual_thumb_dir} -> {dst_thumb_dir}")
+
+    if not run_seo_tho_for_done(project_info, done_folder, callback):
+        try:
+            shutil.rmtree(done_folder)
+        except Exception as e:
+            plog(f"Cannot remove incomplete DONE folder: {e}", "WARN")
+        return False, "SEO-tho failed"
+
+    ok, missing = validate_done_folder(done_folder, require_thumb_folder=visual_thumb_dir.exists())
+    if not ok:
+        try:
+            shutil.rmtree(done_folder)
+        except Exception as e:
+            plog(f"Cannot remove incomplete DONE folder: {e}", "WARN")
+        return False, f"DONE folder missing: {', '.join(missing)}"
 
     files = list(done_folder.iterdir())
     plog(f"Done folder has {len(files)} files: {', '.join(f.name for f in files)}")
@@ -2778,8 +3942,7 @@ def cleanup_source_data(code: str, callback=None, max_retries: int = 3) -> bool:
     Deletes (with retry):
     1. VISUAL/{code}/ folder
     2. Voice files from D:/AUTO/voice/{code}.*
-
-    Note: PROJECTS/{code}/ is deleted earlier in scan_visual_projects() when code appears in VISUAL.
+    3. PROJECTS/{code}/ folder (last)
     """
     def plog(msg, level="INFO"):
         if callback:
@@ -2811,6 +3974,20 @@ def cleanup_source_data(code: str, callback=None, max_retries: int = 3) -> bool:
                 break
         return False
 
+    def is_voice_item_for_code(name: str, code_value: str) -> bool:
+        """Match voice artifacts for a project code."""
+        n = name.strip().lower()
+        c = code_value.strip().lower()
+        if not n or not c:
+            return False
+        return (
+            n == c or
+            n.startswith(c + ".") or
+            n.startswith(c + "-") or
+            n == f"srt_{c}" or
+            n.startswith(f"srt_{c}.")
+        )
+
     deleted_count = 0
     failed_items = []
 
@@ -2826,7 +4003,7 @@ def cleanup_source_data(code: str, callback=None, max_retries: int = 3) -> bool:
     if VOICE_DIR.exists():
         # Delete files at root level (e.g. voice/KA1-0001.txt)
         for item in VOICE_DIR.iterdir():
-            if item.is_file() and (item.name.startswith(code + ".") or item.name.startswith(code + "-")):
+            if item.is_file() and is_voice_item_for_code(item.name, code):
                 if safe_delete(item, "voice file"):
                     deleted_count += 1
                 else:
@@ -2836,11 +4013,19 @@ def cleanup_source_data(code: str, callback=None, max_retries: int = 3) -> bool:
         for subdir in VOICE_DIR.iterdir():
             if subdir.is_dir():
                 for item in subdir.iterdir():
-                    if item.name.startswith(code + ".") or item.name.startswith(code + "-") or item.name == code:
+                    if is_voice_item_for_code(item.name, code):
                         if safe_delete(item, f"voice file ({subdir.name})"):
                             deleted_count += 1
                         else:
                             failed_items.append(str(item))
+
+    # 3. Delete PROJECTS folder LAST (after VISUAL + voice)
+    projects_dir = PROJECTS_DIR / code
+    if projects_dir.exists():
+        if safe_delete(projects_dir, "PROJECTS folder"):
+            deleted_count += 1
+        else:
+            failed_items.append(str(projects_dir))
 
     if deleted_count > 0:
         plog(f"Cleanup complete: {deleted_count} items deleted")
@@ -2862,13 +4047,22 @@ def cleanup_leftover_done_projects() -> int:
     if not DONE_DIR.exists():
         return 0
 
-    # Get all codes that have completed videos in DONE folder
+    with _processing_lock:
+        active_codes = set(_processing_codes)
+
+    # Get all codes that have complete DONE packages.
+    # Do not treat a folder with only mp4 as done: copy_to_done creates DONE early,
+    # then adds thumbnail/SEO later. Cleaning VISUAL during that window breaks edit.
     done_codes = set()
     for item in DONE_DIR.iterdir():
         if item.is_dir():
-            mp4_files = list(item.glob("*.mp4"))
-            if mp4_files:
+            if item.name in active_codes:
+                continue
+            ok, missing = validate_done_folder(item, require_thumb_folder=False)
+            if ok:
                 done_codes.add(item.name)
+            elif list(item.glob("*.mp4")):
+                log(f"  [CLEANUP] Skip incomplete DONE/{item.name}: missing {', '.join(missing)}", "WARN")
 
     if not done_codes:
         return 0
@@ -3046,8 +4240,11 @@ def generate_thumbnail_for_project(project_info: Dict, callback=None) -> bool:
         else:
             log(f"[{code}] {msg}", level)
 
-    # Check for thumbnail folder in VISUAL project
+    # Check for thumbnail folder in VISUAL project. Some producers use "thumb",
+    # older ones use "thumbnail".
     thumbnail_folder = project_dir / "thumbnail"
+    if not thumbnail_folder.exists():
+        thumbnail_folder = project_dir / "thumb"
     if not thumbnail_folder.exists():
         return False
 
@@ -3083,15 +4280,6 @@ def generate_thumbnail_for_project(project_info: Dict, callback=None) -> bool:
 
         if result.returncode == 0:
             plog("  Thumbnail generated successfully")
-
-            # Copy generated thumbnail to DONE folder
-            thumb_output = TOOL_DIR / "thumb" / "thumbnails" / f"{code}.jpg"
-            if thumb_output.exists():
-                done_thumb = DONE_DIR / code / f"{code}_thumb.jpg"
-                if (DONE_DIR / code).exists():
-                    shutil.copy2(thumb_output, done_thumb)
-                    plog(f"  Copied thumbnail to DONE: {done_thumb.name}")
-
             return True
         else:
             plog(f"  Thumbnail generation failed: {result.stderr[-200:] if result.stderr else 'Unknown error'}", "WARN")
@@ -3142,15 +4330,14 @@ def process_project(project_info: Dict, callback=None) -> bool:
             plog(f"Compose failed: {error}", "ERROR")
             return False
 
+        # Generate legacy thumbnail output before DONE copy so SEO-tho can rename
+        # the final jpg once, after all assets are present.
+        generate_thumbnail_for_project(project_info, callback)
+
         success, error = copy_to_done(project_info, video_path, callback)
         if not success:
             plog(f"Copy failed: {error}", "ERROR")
             return False
-
-        # Generate thumbnail if thumb folder exists
-        generate_thumbnail_for_project(project_info, callback)
-
-        delete_visual_project(project_info, callback)
 
         # Update sheet status with aggressive retry (MUST succeed before cleanup)
         sheet_updated = False
@@ -3296,7 +4483,8 @@ def run_scan_loop(parallel: int = None):
             if new_to_submit:
                 log(f"  Found {total_visible} project(s) ready ({len(submitted_codes)} already running, {len(new_to_submit)} new):")
                 for p in new_to_submit[:5]:
-                    log(f"    - {p['code']} ({p['video_count']}v + {p['image_count']}i / {p['total_scenes']} scenes)")
+                    priority = project_priority_key(p)[0]
+                    log(f"    - {p['code']} ({p['video_count']}v + {p['image_count']}i / {p['total_scenes']} scenes, priority={priority:.1f})")
                 if len(new_to_submit) > 5:
                     log(f"    ... and {len(new_to_submit) - 5} more")
                 # Submit new projects to rolling pool (executor queues them, runs up to parallel at once)
