@@ -58,7 +58,7 @@ except ImportError:
 TOOL_DIR = Path(__file__).parent
 VISUAL_DIR = Path(r"D:\AUTO\VISUAL")
 DONE_DIR = Path(r"D:\AUTO\done")
-MUSIC_ARCHIVE_DIR = Path(r"D:\AUTO\music_archive")
+MUSIC_ARCHIVE_DIR = TOOL_DIR / "music"
 THUMB_DIR = Path(r"D:\AUTO\thumbnails")
 VOICE_DIR = Path(r"D:\AUTO\voice")  # Voice source folder
 PROJECTS_DIR = Path(r"D:\VE3_SUITE\PROJECTS")  # SRT projects folder
